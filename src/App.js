@@ -1,4 +1,5 @@
 import { Dialog } from './components/ui/dialog';
+import { PanelLeftOpen } from 'lucide-react';
 import { Menu } from './components/ui/menu';
 import { Select } from './components/ui/select';
 import { Switch } from './components/ui/switch';
@@ -887,8 +888,8 @@ function App() {
             <aside className={`side-panel left ${leftCollapsed ? 'collapsed' : ''}`}>
               <header className="panel-hd">
                 <span className="panel-hd-title">Data sources</span>
-                <button className="plain-btn panel-collapse-btn" onClick={() => setLeftCollapsed(true)}>
-                  «
+                <button className="plain-btn panel-collapse-btn" onClick={() => setLeftCollapsed(true)} aria-label="Collapse sources panel">
+                  <PanelLeftOpen style={{transform: 'rotate(180deg)'}} size={18} />
                 </button>
               </header>
               <div className="sb-search-wrap">
@@ -1297,12 +1298,18 @@ function App() {
 
             <div className="canvas-float-layer" aria-hidden="true">
               {leftCollapsed ? (
-                <button className="float-btn float-left" onClick={() => setLeftCollapsed(false)}>
-                  Sources
+                <button className="float-btn float-left" onClick={() => setLeftCollapsed(false)} aria-label="Expand sources panel" style={{display:'flex',alignItems:'center'}}>
+                  <span>Sources</span>
+                  <PanelLeftOpen style={{marginLeft:8}} size={18} />
                 </button>
               ) : null}
 
-              {/* Removed SQL float button */}
+              {rightCollapsed && rightMode === 'sql' ? (
+                <button className="float-btn float-right" onClick={() => setRightCollapsed(false)} aria-label="Expand SQL panel" style={{display:'flex',alignItems:'center'}}>
+                  <span>SQL</span>
+                  <PanelLeftOpen style={{marginLeft:8, transform: 'rotate(180deg)'}} size={18} />
+                </button>
+              ) : null}
             </div>
 
             <aside className={`side-panel right ${rightCollapsed ? 'collapsed' : ''}`}>
@@ -1316,8 +1323,8 @@ function App() {
                       AI context
                     </Tabs.Tab>
                   </Tabs.List>
-                  <button className="plain-btn panel-collapse-btn" onClick={() => setRightCollapsed(true)}>
-                    »
+                  <button className="plain-btn panel-collapse-btn" onClick={() => setRightCollapsed(true)} aria-label="Collapse SQL panel">
+                    <PanelLeftOpen size={18} />
                   </button>
                 </header>
 
