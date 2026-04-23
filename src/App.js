@@ -349,6 +349,8 @@ function App() {
   const [fieldDisplayNames, setFieldDisplayNames] = useState({});
   const [hiddenFields, setHiddenFields] = useState(new Set());
   const [aiOpen, setAiOpen] = useState(false);
+  const [canvasScroll, setCanvasScroll] = useState({ left: 0, top: 0 });
+  const [inspectView, setInspectView] = useState('visual');
   const [hoveredJoinType, setHoveredJoinType] = useState(null);
   const [joins, setJoins] = useState({
     jp1: {
@@ -358,7 +360,7 @@ function App() {
       toEntity: 'customers',
       from: 'orders.customer_id',
       to: 'customers.customer_id',
-      semantics: 'Many-to-one · Optional dimension (Orders → Customer)',
+      semantics: 'Many-to-one · Optional relationship (Orders → Customer)',
       desc: 'Connects sales to customer profiles. Preservation: All orders are kept regardless of customer match.',
       fromChoices: ['orders.customer_id', 'orders.order_id', 'orders.product_id'],
       toChoices: ['customers.customer_id', 'customers.full_name'],
@@ -370,7 +372,7 @@ function App() {
       toEntity: 'products',
       from: 'orders.product_id',
       to: 'products.product_id',
-      semantics: 'Many-to-one · Required dimension (Orders → Product)',
+      semantics: 'Many-to-one · Required relationship (Orders → Product)',
       desc: 'Connects sales to product catalog. Filter: Only orders with a valid product SKU are included.',
       fromChoices: ['orders.product_id', 'orders.order_id'],
       toChoices: ['products.product_id', 'products.product_name'],
@@ -462,6 +464,70 @@ function App() {
       '  ON o.product_id = p.product_id',
     ].join('\n');
   }, [fieldDisplayNames, joins.jp1.type, joins.jp2.type, visibleFields]);
+
+  const inspectMarkdown = useMemo(() => {
+    const lines = [];
+    lines.push(`# Sales overview`);
+    lines.push(`> **${stage}** · 3 entities · ${visibleFields.length} visible fields`);
+    lines.push('');
+    lines.push('Orders joined with customers and products from two separate databases. Use to analyze revenue by customer segment, region, and product category.');
+    lines.push('');
+    lines.push('**Analytics scope:** Individual order line items');
+    lines.push('');
+    lines.push('## Entities');
+    lines.push('');
+
+    INITIAL_ENTITIES.forEach((entity) => {
+      const visibleEntityFields = entity.fields.filter((f) => !hiddenFields.has(f.key));
+      const dims = visibleEntityFields.filter((f) => f.role !== 'MEASURE');
+      const measures = visibleEntityFields.filter((f) => f.role === 'MEASURE');
+
+      lines.push(`### ${titleCase(entity.label)} (${entity.dbName})${entity.primary ? ' — Primary' : ''}`);
+      lines.push(entity.definition);
+      lines.push('');
+
+      if (dims.length) {
+        lines.push('**Dimensions**');
+        dims.forEach((f) => {
+          const name = fieldDisplayNames[f.key] || f.label;
+          const desc = fieldDescriptions[f.key] || f.semanticDesc;
+          let line = `- \`${name}\``;
+          if (f.isKey) line += ' *(key)*';
+          if (desc) line += ` — ${desc}`;
+          lines.push(line);
+        });
+        lines.push('');
+      }
+
+      if (measures.length) {
+        lines.push('**Measures**');
+        measures.forEach((f) => {
+          const name = fieldDisplayNames[f.key] || f.label;
+          const desc = fieldDescriptions[f.key] || f.semanticDesc;
+          let line = `- \`${name}\``;
+          if (f.calc) line += ' *(computed)*';
+          if (f.agg) line += ` · ${f.agg}`;
+          if (desc) line += ` — ${desc}`;
+          lines.push(line);
+        });
+        lines.push('');
+      }
+    });
+
+    lines.push('## Relationships');
+    lines.push('');
+
+    Object.values(joins).forEach((join) => {
+      lines.push(`### ${titleCase(join.fromEntity)} → ${titleCase(join.toEntity)}`);
+      lines.push(join.semantics.replace(/\s*\(.*?\)\s*$/, ''));
+      lines.push('');
+      lines.push(join.desc);
+      lines.push(`\`${join.from} = ${join.to}\``);
+      lines.push('');
+    });
+
+    return lines.join('\n');
+  }, [stage, visibleFields, hiddenFields, fieldDisplayNames, fieldDescriptions, joins]);
 
   const filteredModels = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -842,7 +908,7 @@ function App() {
             </aside>
 
             <div className="canvas-wrap">
-              <div className="canvas" ref={canvasRef}>
+              <div className="canvas" ref={canvasRef} onScroll={(e) => setCanvasScroll({ left: e.target.scrollLeft, top: e.target.scrollTop })}>
                 <div className="canvas-inner" ref={canvasInnerRef}>
                   <svg className="join-svg" viewBox="0 0 2400 1800" preserveAspectRatio="none">
                     <path d={connectorPaths.jp1Left} />
@@ -931,7 +997,8 @@ function App() {
                     />
                   </button>
 
-                  {activeFieldMeta && fieldPopupPosition ? (
+                  {/* popups moved to canvas-wrap level to avoid overflow clipping */}
+                  {false && activeFieldMeta && fieldPopupPosition ? (
                     <div
                       className="canvas-popup canvas-popup-field"
                       style={{ left: fieldPopupPosition.left, top: fieldPopupPosition.top }}
@@ -1000,7 +1067,7 @@ function App() {
                     </div>
                   ) : null}
 
-                  {activeJoinModel && joinPopupPosition ? (
+                  {false && activeJoinModel && joinPopupPosition ? (
                     <div
                       className="canvas-popup canvas-popup-join"
                       style={{ left: joinPopupPosition.left, top: joinPopupPosition.top }}
@@ -1120,6 +1187,112 @@ function App() {
                 </div>
               </div>
 
+              {activeFieldMeta && fieldPopupPosition ? (
+                <div
+                  className="canvas-popup canvas-popup-field"
+                  style={{ left: fieldPopupPosition.left - canvasScroll.left, top: fieldPopupPosition.top - canvasScroll.top }}
+                >
+                  <span className="canvas-popup-arrow" />
+                  <header className="canvas-popup-head">
+                    <div>
+                      <div className="detail-title">{fieldDisplayNames[activeFieldMeta.key] || activeFieldMeta.label}</div>
+                      <div className="detail-sub">{activeField?.source}</div>
+                    </div>
+                    <button className="plain-btn canvas-popup-close" onClick={closeInspectorPopup}>×</button>
+                  </header>
+                  <div className="canvas-popup-body">
+                    <section className="sp-section">
+                      <p className="sp-lbl">Display name</p>
+                      <input
+                        className="fi-inp"
+                        value={fieldDisplayNames[activeFieldMeta.key] || ''}
+                        placeholder={activeFieldMeta.label}
+                        onChange={(event) => setFieldDisplayNames((prev) => ({ ...prev, [activeFieldMeta.key]: event.target.value }))}
+                      />
+                    </section>
+                    <section className="sp-section">
+                      <p className="sp-lbl">Description for AI</p>
+                      <textarea
+                        className="fi-ta"
+                        value={fieldDescriptions[activeFieldMeta.key] || ''}
+                        onChange={(event) => setFieldDescriptions((prev) => ({ ...prev, [activeFieldMeta.key]: event.target.value }))}
+                        placeholder="What does this field mean in business terms?"
+                      />
+                      <p className="fi-char">{(fieldDescriptions[activeFieldMeta.key] || '').length} chars</p>
+                    </section>
+                    <section className="sp-section">
+                      <div className="fi-toggle-row">
+                        <span>Visible to users</span>
+                        <Switch.Root className="bu-switch" checked={!hiddenFields.has(activeFieldMeta.key)} onCheckedChange={() => toggleHidden(activeFieldMeta.key)}>
+                          <Switch.Thumb className="bu-switch-thumb" />
+                        </Switch.Root>
+                      </div>
+                      <div className="fi-toggle-row">
+                        <span>Include in AI context</span>
+                        <Switch.Root className="bu-switch" defaultChecked>
+                          <Switch.Thumb className="bu-switch-thumb" />
+                        </Switch.Root>
+                      </div>
+                    </section>
+                  </div>
+                </div>
+              ) : null}
+
+              {activeJoinModel && joinPopupPosition ? (
+                <div
+                  className="canvas-popup canvas-popup-join"
+                  style={{ left: joinPopupPosition.left - canvasScroll.left, top: joinPopupPosition.top - canvasScroll.top }}
+                >
+                  <span className="canvas-popup-arrow" />
+                  <header className="canvas-popup-head">
+                    <div>
+                      <div className="detail-title">Join: {activeJoinModel.fromEntity} → {activeJoinModel.toEntity}</div>
+                      <div className="detail-sub">{JOIN_MAP[activeJoinModel.type]}</div>
+                    </div>
+                    <button className="plain-btn canvas-popup-close" onClick={closeInspectorPopup}>×</button>
+                  </header>
+                  <div className="canvas-popup-body">
+                    <section className="sp-section">
+                      <p className="sp-lbl">Join type</p>
+                      <div className="join-type-grid" role="radiogroup" aria-label="Join type selector">
+                        {JOIN_TYPES.map((item) => {
+                          const selected = activeJoinModel.type === item.value;
+                          return (
+                            <button key={item.value} type="button" className={`join-type-card ${selected ? 'selected' : ''}`} role="radio" aria-checked={selected} onClick={() => updateJoin(activeJoinModel.id, 'type', item.value)} onMouseEnter={() => setHoveredJoinType(item.value)} onMouseLeave={() => setHoveredJoinType(null)} title={item.implication}>
+                              <JoinTypeGlyph highlight={item.highlight} />
+                              <span className="join-type-name">{item.label}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {activeJoinTypeMeta ? (
+                        <div className="join-type-hint">
+                          <strong>{activeJoinTypeMeta.label}</strong>
+                          <p>{activeJoinTypeMeta.implication}</p>
+                        </div>
+                      ) : null}
+                    </section>
+                    <section className="sp-section">
+                      <p className="sp-lbl">Key mapping</p>
+                      <div className="join-map-row">
+                        <Select.Root value={activeJoinModel.from} onValueChange={(value) => updateJoin(activeJoinModel.id, 'from', value)} items={activeJoinModel.fromChoices}>
+                          <Select.Trigger className="bu-trigger"><Select.Value /><Select.Icon className="bu-icon">▾</Select.Icon></Select.Trigger>
+                          <Select.Portal><Select.Positioner><Select.Popup className="bu-popup"><Select.List>{activeJoinModel.fromChoices.map((item) => (<Select.Item key={item} value={item} className="bu-item"><Select.ItemText>{item}</Select.ItemText></Select.Item>))}</Select.List></Select.Popup></Select.Positioner></Select.Portal>
+                        </Select.Root>
+                        <span className="join-arrow">→</span>
+                        <Select.Root value={activeJoinModel.to} onValueChange={(value) => updateJoin(activeJoinModel.id, 'to', value)} items={activeJoinModel.toChoices}>
+                          <Select.Trigger className="bu-trigger"><Select.Value /><Select.Icon className="bu-icon">▾</Select.Icon></Select.Trigger>
+                          <Select.Portal><Select.Positioner><Select.Popup className="bu-popup"><Select.List>{activeJoinModel.toChoices.map((item) => (<Select.Item key={item} value={item} className="bu-item"><Select.ItemText>{item}</Select.ItemText></Select.Item>))}</Select.List></Select.Popup></Select.Positioner></Select.Portal>
+                        </Select.Root>
+                      </div>
+                    </section>
+                    <section className="sp-section">
+                      <p className="sp-lbl">Description</p>
+                      <textarea className="fi-ta" value={activeJoinModel.desc} onChange={(event) => updateJoin(activeJoinModel.id, 'desc', event.target.value)} />
+                    </section>
+                  </div>
+                </div>
+              ) : null}
             </div>
 
             <div className="canvas-float-layer" aria-hidden="true">
@@ -1136,8 +1309,8 @@ function App() {
               <Tabs.Root value={rightMode} onValueChange={setRightMode} className="mode-wrap">
                 <header className="panel-hd tight">
                   <Tabs.List className="sql-tabs">
-                    <Tabs.Tab className="sql-tab" value="schema">
-                      Schema
+                    <Tabs.Tab className="sql-tab" value="sql">
+                      SQL
                     </Tabs.Tab>
                     <Tabs.Tab className="sql-tab" value="ai">
                       AI context
@@ -1149,15 +1322,8 @@ function App() {
                 </header>
 
 
-                <Tabs.Panel value="schema" className="sql-content tab-panel">
-                  <pre>{`{
-  "model": "sales_overview",
-  "stage": "${stage}",
-  "joins": [
-    {"from":"${joins.jp1.from}","to":"${joins.jp1.to}","type":"${joins.jp1.type}"},
-    {"from":"${joins.jp2.from}","to":"${joins.jp2.to}","type":"${joins.jp2.type}"}
-  ]
-}`}</pre>
+                <Tabs.Panel value="sql" className="sql-content tab-panel">
+                  <pre>{currentSql}</pre>
                 </Tabs.Panel>
 
                 <Tabs.Panel value="ai" className="sql-content ai-copy tab-panel">
@@ -1235,9 +1401,15 @@ function App() {
           <div className="insp-body">
             <main className="insp-main">
               <header className="insp-model-hd">
-                <h2>
-                  Sales overview <span className={`badge ${badgeClass}`}>{stage}</span>
-                </h2>
+                <div className="insp-model-hd-row">
+                  <h2>
+                    Sales overview <span className={`badge ${badgeClass}`}>{stage}</span>
+                  </h2>
+                  <div className="insp-view-toggle">
+                    <button className={`insp-toggle-btn ${inspectView === 'visual' ? 'active' : ''}`} onClick={() => setInspectView('visual')}>Visual</button>
+                    <button className={`insp-toggle-btn ${inspectView === 'markdown' ? 'active' : ''}`} onClick={() => setInspectView('markdown')}>Markdown</button>
+                  </div>
+                </div>
                 <p>
                   Orders joined with customers and products from two separate databases. Use to analyze revenue by
                   customer segment, region, and product category.
@@ -1255,8 +1427,14 @@ function App() {
 
 
 
-              <h3 className="insp-section-hd">Entities & fields</h3>
-              <div className="insp-masonry">
+              {inspectView === 'markdown' ? (
+                <div className="insp-md-wrap">
+                  <pre className="insp-md-pre">{inspectMarkdown}</pre>
+                </div>
+              ) : null}
+
+              {inspectView === 'visual' ? <h3 className="insp-section-hd">Entities & fields</h3> : null}
+              {inspectView === 'visual' ? <div className="insp-masonry">
                 {INITIAL_ENTITIES.map((entity) => {
                   const visibleEntityFields = entity.fields.filter((field) => !hiddenFields.has(field.key));
                   const dimensionFields = visibleEntityFields.filter((field) => field.role !== 'MEASURE');
@@ -1265,11 +1443,11 @@ function App() {
                   return (
                     <article className={`ent-block ${entity.primary ? 'is-primary' : ''}`} key={entity.id}>
                       <header className="ent-block-hd">
-                        <div>
+                        <div className="ent-block-name-row">
                           <span className="ent-block-name">{titleCase(entity.label)} <span className="ent-block-db">({entity.dbName})</span></span>
-                          <div className="ent-block-grain">{entity.definition}</div>
+                          {entity.primary ? <span className="ent-primary-badge">Primary</span> : null}
                         </div>
-                        {entity.primary ? <span className="ent-primary-badge">Primary</span> : null}
+                        <div className="ent-block-grain">{entity.definition}</div>
                       </header>
 
                       {dimensionFields.length ? (
@@ -1321,14 +1499,18 @@ function App() {
                     </article>
                   );
                 })}
-              </div>
+              </div> : null}
 
-              <h3 className="insp-section-hd">Relationships & Core Logic</h3>
-              {Object.values(joins).map((join) => (
+              {inspectView === 'visual' ? <h3 className="insp-section-hd">Relationships & Core Logic</h3> : null}
+              {inspectView === 'visual' ? Object.values(joins).map((join) => (
                 <article className="join-block" key={join.id}>
                   <header className="join-block-hd">
                     <span className="join-name">{titleCase(join.fromEntity)} → {titleCase(join.toEntity)}</span>
-                    <span className="join-semantics-pill">{join.semantics}</span>
+                    <div className="join-semantics">
+                      {join.semantics.replace(/\s*\(.*?\)\s*$/, '').split(' · ').map((part, i) => (
+                        <span key={i} className={`join-sem-part join-sem-part-${i}`}>{part}</span>
+                      ))}
+                    </div>
                   </header>
                   <div className="join-row">
                     <p className="join-desc">{join.desc}</p>
@@ -1339,7 +1521,7 @@ function App() {
                     </p>
                   </div>
                 </article>
-              ))}
+              )) : null}
             </main>
 
             <aside className="insp-sidebar">
