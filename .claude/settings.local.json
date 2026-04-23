@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cp /Users/GeorgeA-MBP/Documents/GitHub/data-model-ux/src/App.js /Users/GeorgeA-MBP/Documents/GitHub/data-model-ux/.claude/worktrees/musing-williamson-9d510d/src/App.js)",
+      "Bash(cp /Users/GeorgeA-MBP/Documents/GitHub/data-model-ux/src/App.css /Users/GeorgeA-MBP/Documents/GitHub/data-model-ux/.claude/worktrees/musing-williamson-9d510d/src/App.css)",
+      "Bash(cp -r /Users/GeorgeA-MBP/Documents/GitHub/data-model-ux/src/components /Users/GeorgeA-MBP/Documents/GitHub/data-model-ux/.claude/worktrees/musing-williamson-9d510d/src/)",
+      "Bash(cp -r /Users/GeorgeA-MBP/Documents/GitHub/data-model-ux/src/lib /Users/GeorgeA-MBP/Documents/GitHub/data-model-ux/.claude/worktrees/musing-williamson-9d510d/src/)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(gh pr create --title 'Inspect view: semantic layout, markdown toggle, popup fixes' --body ' *)",
+      "Bash(brew install *)"
+    ]
+  }
+}
