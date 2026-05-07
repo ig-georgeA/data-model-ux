@@ -15,7 +15,12 @@
       "Bash(npm install *)",
       "Bash(npm start *)",
       "Bash(curl -s http://localhost:3000)",
-      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000)"
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000)",
+      "Bash(git -C /Users/GeorgeA-MBP/Documents/GitHub/data-model-ux status)",
+      "Bash(git -C /Users/GeorgeA-MBP/Documents/GitHub/data-model-ux diff --stat HEAD)",
+      "Bash(git -C /Users/GeorgeA-MBP/Documents/GitHub/data-model-ux log --oneline -3)",
+      "Bash(git -C /Users/GeorgeA-MBP/Documents/GitHub/data-model-ux show --stat HEAD)",
+      "Bash(npm run *)"
     ]
   }
 }

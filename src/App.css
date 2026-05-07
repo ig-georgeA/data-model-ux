@@ -275,7 +275,7 @@
 
 .kanban {
   padding: 24px;
-  gap: 16px;
+  gap: 28px;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   overflow: auto;
@@ -327,6 +327,13 @@
   box-shadow: 0 8px 20px rgba(17, 24, 39, 0.07);
 }
 
+.mcard-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+
 .mcard-name {
   font-size: 14px;
   font-weight: 600;
@@ -349,14 +356,16 @@
 
 .mcard-uses {
   color: var(--text-3);
-  font-size: 13px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
 }
 
 .mcard-usage {
-  margin-left: auto;
   display: inline-flex;
-  align-items: center;
-  gap: 8px;
+  align-items: flex-end;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .mcard-usage-dots {
@@ -374,12 +383,12 @@
   flex-shrink: 0;
 }
 
-/* Staircase heights — signal-strength look */
-.mcard-usage-dot:nth-child(1) { height: 6px; }
-.mcard-usage-dot:nth-child(2) { height: 8px; }
-.mcard-usage-dot:nth-child(3) { height: 10px; }
-.mcard-usage-dot:nth-child(4) { height: 13px; }
-.mcard-usage-dot:nth-child(5) { height: 16px; }
+/* Staircase heights scaled to sit flush with 12px text cap-height */
+.mcard-usage-dot:nth-child(1) { height: 4px; }
+.mcard-usage-dot:nth-child(2) { height: 6px; }
+.mcard-usage-dot:nth-child(3) { height: 8px; }
+.mcard-usage-dot:nth-child(4) { height: 10px; }
+.mcard-usage-dot:nth-child(5) { height: 12px; }
 
 .mcard-usage-dot.is-filled {
   background: var(--blue);
@@ -562,6 +571,18 @@
   background: var(--blue-bg);
 }
 
+.tbl-primary-pill {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--amber);
+  background: var(--amber-bg);
+  border: 1px solid var(--amber-border);
+  border-radius: 999px;
+  padding: 1px 6px;
+  letter-spacing: 0.01em;
+}
+
 .tbl-row-name {
   flex: 1;
   min-width: 0;
@@ -622,7 +643,15 @@
 
 
 .ecard.primary {
-  border-top: 3px solid var(--blue);
+  border-top: 3px solid var(--amber);
+}
+
+.ecard.selected {
+  box-shadow: 0 0 0 1.5px var(--blue), 0 10px 20px rgba(20, 20, 20, 0.07);
+}
+
+.ecard.primary.selected {
+  border-top-color: var(--blue);
 }
 
 .ec-hd {
@@ -826,7 +855,7 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding: 12px 14px 10px;
+  padding: 14px 16px 12px;
   border-bottom: 1px solid var(--border);
   background: linear-gradient(180deg, rgba(37, 99, 235, 0.04), transparent 90%);
   border-top-left-radius: 14px;
@@ -851,8 +880,9 @@
 .canvas-popup-body {
   position: relative;
   z-index: 1;
-  max-height: 440px;
-  overflow: auto;
+  max-height: 520px;
+  overflow-y: auto;
+  overflow-x: hidden;
   border-bottom-left-radius: 14px;
   border-bottom-right-radius: 14px;
 }
@@ -974,6 +1004,8 @@
 }
 
 .float-auto-arrange {
+  top: auto;
+  bottom: 20px;
   left: 50%;
   transform: translateX(-50%);
   font-size: 12px;
@@ -1088,7 +1120,7 @@
 }
 
 .sp-section {
-  padding: 12px;
+  padding: 14px 16px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -1126,19 +1158,220 @@
   text-align: right;
 }
 
+/* ── Formula Editor ────────────────────────────────────────────────────────── */
+.formula-editor {
+  position: relative;
+  border: 1px solid var(--border-2);
+  border-radius: 7px;
+  background: var(--surface);
+  overflow: visible;
+}
+
+.formula-editor-inner {
+  position: relative;
+  min-height: 60px;
+}
+
+/* Highlight layer — mirrors textarea content */
+.formula-highlight {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 8px;
+  font-family: 'SF Mono', 'Fira Code', 'Fira Mono', monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: hidden;
+  pointer-events: none;
+  border-radius: 7px;
+  color: transparent;
+  /* same box model as textarea */
+  box-sizing: border-box;
+  border: 1px solid transparent;
+}
+
+/* Transparent textarea overlaid on top */
+.formula-textarea {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-height: 60px;
+  padding: 8px;
+  font-family: 'SF Mono', 'Fira Code', 'Fira Mono', monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--text);
+  border: none;
+  border-radius: 7px;
+  resize: vertical;
+  outline: none;
+  box-sizing: border-box;
+  white-space: pre-wrap;
+  word-break: break-word;
+  z-index: 2;
+}
+
+.formula-textarea::placeholder {
+  color: var(--text-3);
+}
+
+/* Token colors */
+.ftok-fn      { color: #7c3aed; }  /* purple — functions */
+.ftok-field   { color: #0f766e; }  /* teal — field names */
+.ftok-keyword { color: #1f5fe0; }  /* blue — keywords (AND/OR/NULL etc.) */
+.ftok-number  { color: #16803a; }  /* green — numeric literals */
+.ftok-string  { color: #b45309; }  /* amber — string literals */
+.ftok-op      { color: #6b7280; }  /* gray — operators */
+.ftok-paren   { color: #9ca3af; }  /* light gray — parens */
+.ftok-comma   { color: #9ca3af; }
+.ftok-ws,
+.ftok-ident,
+.ftok-unknown { color: var(--text); }
+
+/* Typeahead dropdown */
+.formula-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.13);
+  z-index: 200;
+  overflow: hidden;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.formula-dd-item {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  width: 100%;
+  padding: 7px 10px;
+  font-size: 12px;
+  text-align: left;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.formula-dd-item:hover,
+.formula-dd-item.selected {
+  background: var(--blue-bg);
+}
+
+.fdd-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+
+.fdd-badge-fn {
+  background: #ede9fe;
+  color: #7c3aed;
+}
+
+.fdd-badge-field {
+  background: #ccfbf1;
+  color: #0f766e;
+}
+
+.fdd-name {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.fdd-sig {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  color: var(--text-3);
+  flex-shrink: 0;
+  display: none;
+}
+
+.formula-dd-item.selected .fdd-sig {
+  display: inline;
+}
+
+.fdd-desc {
+  font-size: 11px;
+  color: var(--text-3);
+  margin-left: auto;
+  flex-shrink: 0;
+  max-width: 120px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Calc field modal */
+.calc-field-modal {
+  width: 480px;
+  max-width: 95vw;
+  padding: 0;
+  overflow: hidden;
+}
+
+.calc-field-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.calc-field-header .modal-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.calc-field-body {
+  overflow-y: auto;
+  max-height: 60vh;
+}
+
+.calc-field-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+}
+
+.calc-agg-trigger {
+  width: 100%;
+}
+
 .fi-toggle-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 7px 0;
+  padding: 6px 0;
+  font-size: 14px;
 }
 
 .bu-switch {
-  width: 34px;
-  height: 19px;
+  width: 34px !important;
+  height: 20px !important;
   border-radius: 999px;
   background: var(--border-2);
   position: relative;
+  flex-shrink: 0;
+  transition: background 0.18s ease;
 }
 
 .bu-switch[data-state='checked'] {
@@ -1146,18 +1379,21 @@
 }
 
 .bu-switch-thumb {
-  width: 15px;
-  height: 15px;
+  display: block;
+  width: 14px !important;
+  height: 14px !important;
   border-radius: 999px;
   background: #fff;
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  transition: transform 0.15s ease;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  position: absolute !important;
+  top: 3px;
+  left: 3px;
+  transition: transform 0.18s ease;
+  transform: translateX(0) !important;
 }
 
 .bu-switch[data-state='checked'] .bu-switch-thumb {
-  transform: translateX(15px);
+  transform: translateX(14px) !important;
 }
 
 .join-map-row {
@@ -1257,6 +1493,7 @@
 .ptab td {
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
+  text-align: left;
 }
 
 .ptab th {
@@ -1270,6 +1507,10 @@
 
 .active-col {
   background: var(--blue-bg);
+}
+
+.ptab .col-num {
+  text-align: right;
 }
 
 .null-val {
@@ -1380,6 +1621,14 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* JSON syntax highlighting */
+.json-pre { background: #1e1e2e; color: #cdd6f4; border-color: transparent; }
+.json-key   { color: #89b4fa; }   /* blue — object keys */
+.json-str   { color: #a6e3a1; }   /* green — string values */
+.json-num   { color: #fab387; }   /* peach — numbers */
+.json-lit   { color: #cba6f7; }   /* mauve — true / false / null */
+.json-punct { color: #6c7086; }   /* overlay2 — braces, brackets, colons, commas */
 
 .insp-model-hd-row h2 {
   margin: 0;
@@ -2066,6 +2315,7 @@
   inset: 0;
   background: transparent;
   pointer-events: none;
+  z-index: 1000;
 }
 
 .ai-chat-viewport {
@@ -2076,6 +2326,7 @@
   align-items: flex-start;
   padding-top: 50px; /* flush with nav bottom */
   pointer-events: none;
+  z-index: 1000;
 }
 
 .ai-chat-viewport > * {
@@ -2088,6 +2339,7 @@
   height: min(520px, 82vh);
   display: flex;
   flex-direction: column;
+  position: relative;
   padding: 0;
   overflow: hidden;
   /* Square top — continues flush from the pill above */
@@ -2104,41 +2356,22 @@
     0 100px 200px rgba(0, 0, 0, 0.08);
 }
 
-.ai-chat-hd {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 14px 16px 12px;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-
-.ai-chat-sparkle {
-  color: var(--blue);
-  font-size: 14px;
-  flex-shrink: 0;
-}
-
-.ai-chat-title {
-  flex: 1;
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.ai-chat-close {
-  width: 28px;
-  height: 28px;
-  border-radius: 7px;
+.ai-chat-close-float {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
   color: var(--text-3);
-  font-size: 17px;
+  font-size: 15px;
   display: flex;
   align-items: center;
   justify-content: center;
-  flex-shrink: 0;
+  z-index: 1;
 }
 
-.ai-chat-close:hover {
+.ai-chat-close-float:hover {
   background: var(--surface-2);
   color: var(--text);
 }
@@ -2343,9 +2576,6 @@
   gap: 10px;
 }
 
-.ds-modal-search-wrap {
-  /* search input row */
-}
 
 .ds-modal-search-wrap .ds-search-input {
   width: 100%;
@@ -2626,10 +2856,6 @@
   letter-spacing: -0.02em;
 }
 
-/* ── Model name input in modal header ─────────────────────────────────── */
-.ds-model-name-wrap {
-  /* sits in modal head gap */
-}
 
 .ds-model-name-inp {
   width: 100%;

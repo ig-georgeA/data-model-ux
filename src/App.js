@@ -4,11 +4,11 @@ import { Menu } from './components/ui/menu';
 import { Select } from './components/ui/select';
 import { Switch } from './components/ui/switch';
 import { Tabs } from './components/ui/tabs';
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   ReactFlow, Background, Handle, Position,
   getBezierPath, EdgeLabelRenderer,
-  useReactFlow, ReactFlowProvider, useStore, useNodesInitialized,
+  useReactFlow, ReactFlowProvider, useStore, useNodesState,
 } from '@xyflow/react';
 import Dagre from '@dagrejs/dagre';
 import './App.css';
@@ -33,12 +33,12 @@ const INITIAL_ENTITIES = [
     id: 'orders', label: 'orders', dbName: 'Sales DB', source: 'Sales DB · primary', primary: true,
     definition: 'Each record represents an individual order line item',
     fields: [
-      { key: 'order_id', label: 'order_id', type: '#', isKey: true, role: 'ID' },
-      { key: 'customer_id', label: 'customer_id', type: '#', role: 'DIMENSION' },
-      { key: 'product_id', label: 'product_id', type: '#', role: 'DIMENSION' },
-      { key: 'order_date', label: 'order_date', type: 'dt', role: 'DIMENSION' },
-      { key: 'amount', label: 'amount', type: '$', role: 'MEASURE', agg: 'SUM' },
-      { key: 'revenue_net', label: 'revenue_net', type: 'fx', calc: true, role: 'MEASURE', agg: 'SUM', semanticDesc: 'Net revenue after customer discounts and product costs' },
+      { key: 'order_id', label: 'order_id', type: '#', isKey: true, role: 'ID', semanticDesc: 'Unique identifier per order line item. Use COUNT(DISTINCT order_id) to measure order volume. Never aggregate directly.' },
+      { key: 'customer_id', label: 'customer_id', type: '#', role: 'DIMENSION', semanticDesc: 'Foreign key to the customers table. Null values indicate guest or unattributed orders, which are preserved in this model via the LEFT JOIN.' },
+      { key: 'product_id', label: 'product_id', type: '#', role: 'DIMENSION', semanticDesc: 'Foreign key to the products table. This model uses an INNER JOIN on product_id, so orders without a matching product SKU are excluded.' },
+      { key: 'order_date', label: 'order_date', type: 'dt', role: 'DIMENSION', semanticDesc: 'Date the order was placed (UTC). Primary time axis for this model. Use to group by day, week, month, or quarter for trend and cohort analysis.' },
+      { key: 'amount', label: 'amount', type: '$', role: 'MEASURE', agg: 'SUM', semanticDesc: 'Gross order revenue in USD before any discounts or cost deductions. Aggregate with SUM. For margin or profitability questions, use revenue_net instead.' },
+      { key: 'revenue_net', label: 'revenue_net', type: 'fx', calc: true, role: 'MEASURE', agg: 'SUM', semanticDesc: 'Net revenue after deducting customer discounts and product unit cost from gross amount. The preferred metric for profitability and margin analysis.' },
     ],
     x: 80, y: 70,
   },
@@ -46,10 +46,10 @@ const INITIAL_ENTITIES = [
     id: 'customers', label: 'customers', dbName: 'Sales DB', source: 'Sales DB',
     definition: 'Each record represents a unique customer identity',
     fields: [
-      { key: 'customer_id', label: 'customer_id', type: '#', isKey: true, role: 'ID' },
-      { key: 'full_name', label: 'full_name', type: 'Aa', role: 'DIMENSION' },
-      { key: 'region', label: 'region', type: 'Aa', role: 'DIMENSION' },
-      { key: 'segment', label: 'segment', type: 'Aa', role: 'DIMENSION' },
+      { key: 'customer_id', label: 'customer_id', type: '#', isKey: true, role: 'ID', semanticDesc: 'Primary key for the customers table. Each row is a unique, deduplicated customer. Use to JOIN with orders.customer_id.' },
+      { key: 'full_name', label: 'full_name', type: 'Aa', role: 'DIMENSION', semanticDesc: "Customer's display name. Use for labeling in user-facing reports. Avoid grouping or joining on this field; use customer_id instead." },
+      { key: 'region', label: 'region', type: 'Aa', role: 'DIMENSION', semanticDesc: 'Geographic sales region (e.g. APAC, LATAM, EMEA, NA). Use to segment and compare revenue or customer counts across markets.' },
+      { key: 'segment', label: 'segment', type: 'Aa', role: 'DIMENSION', semanticDesc: 'Customer market tier (e.g. Enterprise, Mid-Market, SMB). Key dimension for cohort analysis, revenue breakdown by business size, and retention comparisons.' },
     ],
     x: 390, y: 70,
   },
@@ -57,10 +57,10 @@ const INITIAL_ENTITIES = [
     id: 'products', label: 'products', dbName: 'Product DB', source: 'Product DB',
     definition: 'Each record represents a product SKU',
     fields: [
-      { key: 'product_id', label: 'product_id', type: '#', isKey: true, role: 'ID' },
-      { key: 'product_name', label: 'product_name', type: 'Aa', role: 'DIMENSION' },
-      { key: 'category', label: 'category', type: 'Aa', role: 'DIMENSION' },
-      { key: 'unit_cost', label: 'unit_cost', type: '$', role: 'MEASURE', agg: 'AVG' },
+      { key: 'product_id', label: 'product_id', type: '#', isKey: true, role: 'ID', semanticDesc: 'Primary key for the product catalog. Each row is a unique SKU. Use to JOIN with orders.product_id to enrich sales with product attributes.' },
+      { key: 'product_name', label: 'product_name', type: 'Aa', role: 'DIMENSION', semanticDesc: 'Human-readable product name. Use for labeling product-level results. For grouping or aggregating across product lines, prefer category.' },
+      { key: 'category', label: 'category', type: 'Aa', role: 'DIMENSION', semanticDesc: 'Product line grouping (e.g. Licenses, Services, Hardware). Use to aggregate and compare revenue across types of offering.' },
+      { key: 'unit_cost', label: 'unit_cost', type: '$', role: 'MEASURE', agg: 'AVG', semanticDesc: 'Cost to the business per product unit in USD, averaged across orders. Multiply by units sold to estimate total cost of goods sold (COGS).' },
     ],
     x: 245, y: 315,
   },
@@ -76,17 +76,64 @@ const JOIN_TYPES = [
 ];
 
 const PREVIEW_ROWS = [
-  { order_id: 10041, order_date: '2025-03-01', amount: '$840', revenue_net: '$620', full_name: 'Priya Sharma', region: 'APAC', segment: 'Enterprise', product_name: 'Pro Seat', category: 'Licenses' },
-  { order_id: 10042, order_date: '2025-03-02', amount: '$320', revenue_net: '$210', full_name: null, region: null, segment: null, product_name: 'Starter Pack', category: 'Licenses' },
-  { order_id: 10043, order_date: '2025-03-02', amount: '$1,200', revenue_net: '$940', full_name: 'Carlos Vega', region: 'LATAM', segment: 'Mid-Market', product_name: 'Enterprise Suite', category: 'Licenses' },
+  { order_id: 10041, customer_id: 201, product_id: 301, order_date: '2025-03-01', amount: '$840', revenue_net: '$620', full_name: 'Priya Sharma', region: 'APAC', segment: 'Enterprise', product_name: 'Pro Seat', category: 'Licenses', unit_cost: '$220' },
+  { order_id: 10042, customer_id: null, product_id: 302, order_date: '2025-03-02', amount: '$320', revenue_net: '$210', full_name: null, region: null, segment: null, product_name: 'Starter Pack', category: 'Licenses', unit_cost: '$110' },
+  { order_id: 10043, customer_id: 203, product_id: 303, order_date: '2025-03-02', amount: '$1,200', revenue_net: '$940', full_name: 'Carlos Vega', region: 'LATAM', segment: 'Mid-Market', product_name: 'Enterprise Suite', category: 'Licenses', unit_cost: '$260' },
 ];
 
 const JOIN_MAP = { INNER: 'INNER JOIN', LEFT: 'LEFT JOIN', RIGHT: 'RIGHT JOIN', FULL: 'FULL OUTER JOIN', LEFT_EXCL: 'LEFT JOIN', RIGHT_EXCL: 'RIGHT JOIN' };
+
+const ActiveFieldContext = createContext(null);
+
+const DBT_TYPE_MAP = { '#': 'integer', '$': 'numeric', 'Aa': 'varchar', 'dt': 'timestamp', 'fx': 'numeric' };
+const DBT_AGG_MAP = { SUM: 'sum', AVG: 'average', COUNT: 'count', MIN: 'min', MAX: 'max' };
+
+function dbSourceName(dbName) { return dbName.toLowerCase().replace(/\s+/g, '_'); }
 
 const ENTITY_CARD_WIDTH = 195;
 const ENTITY_ROW_HEIGHT = 25;
 const ENTITY_HEADER_HEIGHT = 39;
 const ENTITY_FOOTER_HEIGHT = 32;
+
+const FORMULA_FUNCTIONS = [
+  // Math
+  { name: 'ABS',      category: 'Math',      signature: 'ABS(number)',              desc: 'Absolute value' },
+  { name: 'ROUND',    category: 'Math',      signature: 'ROUND(number, decimals)',   desc: 'Round to decimals' },
+  { name: 'FLOOR',    category: 'Math',      signature: 'FLOOR(number)',             desc: 'Round down to integer' },
+  { name: 'CEIL',     category: 'Math',      signature: 'CEIL(number)',              desc: 'Round up to integer' },
+  { name: 'SQRT',     category: 'Math',      signature: 'SQRT(number)',              desc: 'Square root' },
+  { name: 'POWER',    category: 'Math',      signature: 'POWER(base, exp)',          desc: 'Raise to a power' },
+  { name: 'MOD',      category: 'Math',      signature: 'MOD(number, divisor)',      desc: 'Modulo remainder' },
+  // Aggregates
+  { name: 'SUM',      category: 'Aggregate', signature: 'SUM(field)',                desc: 'Sum of values' },
+  { name: 'AVG',      category: 'Aggregate', signature: 'AVG(field)',                desc: 'Average value' },
+  { name: 'MIN',      category: 'Aggregate', signature: 'MIN(field)',                desc: 'Minimum value' },
+  { name: 'MAX',      category: 'Aggregate', signature: 'MAX(field)',                desc: 'Maximum value' },
+  { name: 'COUNT',    category: 'Aggregate', signature: 'COUNT(field)',              desc: 'Count of non-null values' },
+  // Logic
+  { name: 'IF',       category: 'Logic',     signature: 'IF(condition, then, else)', desc: 'Conditional expression' },
+  { name: 'IIF',      category: 'Logic',     signature: 'IIF(condition, then, else)',desc: 'Inline conditional' },
+  { name: 'CASE',     category: 'Logic',     signature: 'CASE WHEN … THEN … END',   desc: 'Multi-branch condition' },
+  { name: 'COALESCE', category: 'Logic',     signature: 'COALESCE(a, b, …)',         desc: 'First non-null value' },
+  { name: 'NULLIF',   category: 'Logic',     signature: 'NULLIF(a, b)',              desc: 'Null if a equals b' },
+  { name: 'ISNULL',   category: 'Logic',     signature: 'ISNULL(value)',             desc: 'True when value is null' },
+  // String
+  { name: 'CONCAT',   category: 'String',    signature: 'CONCAT(a, b, …)',           desc: 'Concatenate strings' },
+  { name: 'UPPER',    category: 'String',    signature: 'UPPER(text)',               desc: 'Convert to uppercase' },
+  { name: 'LOWER',    category: 'String',    signature: 'LOWER(text)',               desc: 'Convert to lowercase' },
+  { name: 'TRIM',     category: 'String',    signature: 'TRIM(text)',                desc: 'Strip leading/trailing spaces' },
+  { name: 'LEN',      category: 'String',    signature: 'LEN(text)',                 desc: 'Character count' },
+  // Date
+  { name: 'NOW',      category: 'Date',      signature: 'NOW()',                     desc: 'Current timestamp' },
+  { name: 'TODAY',    category: 'Date',      signature: 'TODAY()',                   desc: 'Current date' },
+  { name: 'YEAR',     category: 'Date',      signature: 'YEAR(date)',                desc: 'Year part of date' },
+  { name: 'MONTH',    category: 'Date',      signature: 'MONTH(date)',               desc: 'Month part of date' },
+  { name: 'DAY',      category: 'Date',      signature: 'DAY(date)',                 desc: 'Day part of date' },
+  { name: 'DATEDIFF', category: 'Date',      signature: 'DATEDIFF(unit, start, end)', desc: 'Difference between dates' },
+];
+
+const FORMULA_FN_SET = new Set(FORMULA_FUNCTIONS.map((f) => f.name));
+const FORMULA_KEYWORDS = new Set(['AND','OR','NOT','THEN','ELSE','END','WHEN','AS','IN','BETWEEN','NULL','TRUE','FALSE']);
 
 const CONNECTOR_CATEGORIES = [
   {
@@ -173,46 +220,46 @@ const DATASOURCE_TABLES = {
 
 const TABLE_FIELDS = {
   'returns': [
-    { key: 'return_id', label: 'return_id', type: '#', isKey: true, role: 'ID' },
-    { key: 'order_id', label: 'order_id', type: '#', role: 'DIMENSION' },
-    { key: 'customer_id', label: 'customer_id', type: '#', role: 'DIMENSION' },
-    { key: 'return_date', label: 'return_date', type: 'dt', role: 'DIMENSION' },
-    { key: 'reason', label: 'reason', type: 'Aa', role: 'DIMENSION' },
+    { key: 'return_id', label: 'return_id', type: '#', isKey: true, role: 'ID', semanticDesc: 'Unique identifier per return record. Use COUNT(DISTINCT return_id) to measure return volume or return rate.' },
+    { key: 'order_id', label: 'order_id', type: '#', role: 'DIMENSION', semanticDesc: 'Links the return to its originating order. Join with orders on order_id to calculate return rate as a share of total orders.' },
+    { key: 'customer_id', label: 'customer_id', type: '#', role: 'DIMENSION', semanticDesc: 'Links the return to the customer who initiated it. Use to identify high-return customers or segments prone to returns.' },
+    { key: 'return_date', label: 'return_date', type: 'dt', role: 'DIMENSION', semanticDesc: 'Date the return was initiated. Use for time-series analysis of return rates and to compute days-to-return from order_date.' },
+    { key: 'reason', label: 'reason', type: 'Aa', role: 'DIMENSION', semanticDesc: 'Customer-stated reason for the return (e.g. Damaged, Wrong Item, Not as Described). Use to categorize return drivers and prioritize quality improvements.' },
   ],
   'shipments': [
-    { key: 'shipment_id', label: 'shipment_id', type: '#', isKey: true, role: 'ID' },
-    { key: 'order_id', label: 'order_id', type: '#', role: 'DIMENSION' },
-    { key: 'shipped_at', label: 'shipped_at', type: 'dt', role: 'DIMENSION' },
-    { key: 'carrier', label: 'carrier', type: 'Aa', role: 'DIMENSION' },
-    { key: 'status', label: 'status', type: 'Aa', role: 'DIMENSION' },
+    { key: 'shipment_id', label: 'shipment_id', type: '#', isKey: true, role: 'ID', semanticDesc: 'Unique identifier per shipment. One order may produce multiple shipments (e.g. split fulfillment).' },
+    { key: 'order_id', label: 'order_id', type: '#', role: 'DIMENSION', semanticDesc: 'Links the shipment to its originating order. Join with orders to calculate fulfillment lag (shipped_at minus order_date).' },
+    { key: 'shipped_at', label: 'shipped_at', type: 'dt', role: 'DIMENSION', semanticDesc: 'Timestamp when the shipment was dispatched. Subtract from order_date to compute fulfillment lag. Use for SLA compliance analysis.' },
+    { key: 'carrier', label: 'carrier', type: 'Aa', role: 'DIMENSION', semanticDesc: 'Shipping carrier name (e.g. FedEx, UPS, DHL). Use to compare delivery performance, cost, and on-time rates across carriers.' },
+    { key: 'status', label: 'status', type: 'Aa', role: 'DIMENSION', semanticDesc: 'Current delivery status (e.g. In Transit, Delivered, Returned, Lost). Filter to Delivered for fulfilled-order analysis; use other values for exception reporting.' },
   ],
   'invoices': [
-    { key: 'invoice_id', label: 'invoice_id', type: '#', isKey: true, role: 'ID' },
-    { key: 'order_id', label: 'order_id', type: '#', role: 'DIMENSION' },
-    { key: 'customer_id', label: 'customer_id', type: '#', role: 'DIMENSION' },
-    { key: 'amount', label: 'amount', type: '$', role: 'MEASURE', agg: 'SUM' },
-    { key: 'issued_at', label: 'issued_at', type: 'dt', role: 'DIMENSION' },
+    { key: 'invoice_id', label: 'invoice_id', type: '#', isKey: true, role: 'ID', semanticDesc: 'Unique identifier per invoice. One order may generate multiple invoices due to partial billing or payment schedules.' },
+    { key: 'order_id', label: 'order_id', type: '#', role: 'DIMENSION', semanticDesc: 'Links the invoice to its originating order. Join with orders to reconcile billed revenue against booked revenue.' },
+    { key: 'customer_id', label: 'customer_id', type: '#', role: 'DIMENSION', semanticDesc: 'Links the invoice to the customer. Use for accounts-receivable analysis, overdue tracking, and revenue recognition by customer.' },
+    { key: 'amount', label: 'amount', type: '$', role: 'MEASURE', agg: 'SUM', semanticDesc: 'Invoice amount in USD. SUM for total billed revenue. May differ from order amount due to partial billing, credits, or adjustments.' },
+    { key: 'issued_at', label: 'issued_at', type: 'dt', role: 'DIMENSION', semanticDesc: 'Date the invoice was issued. Use to measure billing lag from order_date and for Days Sales Outstanding (DSO) calculations.' },
   ],
   'categories': [
-    { key: 'category_id', label: 'category_id', type: '#', isKey: true, role: 'ID' },
-    { key: 'name', label: 'name', type: 'Aa', role: 'DIMENSION' },
-    { key: 'parent_id', label: 'parent_id', type: '#', role: 'DIMENSION' },
+    { key: 'category_id', label: 'category_id', type: '#', isKey: true, role: 'ID', semanticDesc: 'Primary key for the category hierarchy. Join with products on category_id to attach category labels to product-level data.' },
+    { key: 'name', label: 'name', type: 'Aa', role: 'DIMENSION', semanticDesc: 'Display name of the product category. Use for labeling category-level breakdowns in reports and dashboards.' },
+    { key: 'parent_id', label: 'parent_id', type: '#', role: 'DIMENSION', semanticDesc: 'References the parent category for nested hierarchies. A null value indicates a top-level category. Use to roll up metrics to higher-level groupings.' },
   ],
   'inventory': [
-    { key: 'inventory_id', label: 'inventory_id', type: '#', isKey: true, role: 'ID' },
-    { key: 'product_id', label: 'product_id', type: '#', role: 'DIMENSION' },
-    { key: 'quantity', label: 'quantity', type: '#', role: 'MEASURE', agg: 'SUM' },
-    { key: 'warehouse', label: 'warehouse', type: 'Aa', role: 'DIMENSION' },
+    { key: 'inventory_id', label: 'inventory_id', type: '#', isKey: true, role: 'ID', semanticDesc: 'Unique identifier for a stock record scoped to one product at one warehouse. Use COUNT to measure number of active stock positions.' },
+    { key: 'product_id', label: 'product_id', type: '#', role: 'DIMENSION', semanticDesc: 'Links inventory to a product SKU. Join with products to enrich stock data with product name, category, and cost.' },
+    { key: 'quantity', label: 'quantity', type: '#', role: 'MEASURE', agg: 'SUM', semanticDesc: 'Current stock level for this product at this warehouse. SUM across warehouses for total available inventory. Compare with units_sold to assess stockout risk.' },
+    { key: 'warehouse', label: 'warehouse', type: 'Aa', role: 'DIMENSION', semanticDesc: 'Name or identifier of the warehouse location. Use to compare stock levels across fulfillment centers or identify regional supply imbalances.' },
   ],
   'suppliers': [
-    { key: 'supplier_id', label: 'supplier_id', type: '#', isKey: true, role: 'ID' },
-    { key: 'name', label: 'name', type: 'Aa', role: 'DIMENSION' },
-    { key: 'country', label: 'country', type: 'Aa', role: 'DIMENSION' },
+    { key: 'supplier_id', label: 'supplier_id', type: '#', isKey: true, role: 'ID', semanticDesc: 'Primary key for supplier records. Use to JOIN with product or inventory tables to attribute stock to its source vendor.' },
+    { key: 'name', label: 'name', type: 'Aa', role: 'DIMENSION', semanticDesc: 'Supplier company name. Use for labeling supplier-level reports or filtering to a specific vendor in procurement analysis.' },
+    { key: 'country', label: 'country', type: 'Aa', role: 'DIMENSION', semanticDesc: 'Country where the supplier is based. Use for supply chain geographic risk analysis, import compliance checks, and regional procurement reporting.' },
   ],
   'v_product_performance': [
-    { key: 'product_id', label: 'product_id', type: '#', isKey: true, role: 'ID' },
-    { key: 'revenue', label: 'revenue', type: '$', role: 'MEASURE', agg: 'SUM' },
-    { key: 'units_sold', label: 'units_sold', type: '#', role: 'MEASURE', agg: 'SUM' },
+    { key: 'product_id', label: 'product_id', type: '#', isKey: true, role: 'ID', semanticDesc: 'Links performance metrics to a product SKU. Join with products to enrich with name, category, and cost for full product analysis.' },
+    { key: 'revenue', label: 'revenue', type: '$', role: 'MEASURE', agg: 'SUM', semanticDesc: 'Total revenue attributed to this product over the reporting period. SUM for overall product revenue. Compare against unit_cost to evaluate per-product margin.' },
+    { key: 'units_sold', label: 'units_sold', type: '#', role: 'MEASURE', agg: 'SUM', semanticDesc: 'Total units sold for this product. SUM across the period. Divide into revenue to compute average selling price (ASP).' },
   ],
 };
 
@@ -328,6 +375,33 @@ function EyeOffIcon({ className = 'eye-off-icon' }) {
   );
 }
 
+function JsonHighlight({ json }) {
+  // Tokenize JSON into colored spans: keys, strings, numbers, booleans/null, punctuation
+  const re = /("(?:[^"\\]|\\.)*")(\s*:)?|(\btrue\b|\bfalse\b|\bnull\b)|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|([{}[\],:])/g;
+  const parts = [];
+  let last = 0;
+  let m;
+  re.lastIndex = 0;
+  while ((m = re.exec(json)) !== null) {
+    if (m.index > last) parts.push(<span key={last}>{json.slice(last, m.index)}</span>);
+    if (m[1] !== undefined) {
+      // string — check if it's a key (followed by colon) or a value
+      const isKey = m[2] !== undefined;
+      parts.push(<span key={m.index} className={isKey ? 'json-key' : 'json-str'}>{m[1]}</span>);
+      if (isKey) parts.push(<span key={`${m.index}-c`} className="json-punct">{m[2]}</span>);
+    } else if (m[3] !== undefined) {
+      parts.push(<span key={m.index} className="json-lit">{m[3]}</span>);
+    } else if (m[4] !== undefined) {
+      parts.push(<span key={m.index} className="json-num">{m[4]}</span>);
+    } else if (m[5] !== undefined) {
+      parts.push(<span key={m.index} className="json-punct">{m[5]}</span>);
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < json.length) parts.push(<span key={last}>{json.slice(last)}</span>);
+  return <pre className="insp-md-pre json-pre">{parts}</pre>;
+}
+
 function SqlHighlight({ sql }) {
   const re = /(--[^\n]*)|(\b(?:SELECT|FROM|LEFT|RIGHT|INNER|OUTER|FULL|JOIN|ON|WHERE|GROUP|ORDER|BY|AND|OR|AS|WITH|HAVING|DISTINCT|LIMIT|NOT|NULL|IS)\b)/gi;
   const parts = [];
@@ -348,16 +422,166 @@ function titleCase(value) {
   return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
 }
 
+// ── Formula tokenizer ─────────────────────────────────────────────────────
+function tokenizeFormula(text, availableFields) {
+  const fieldSet = new Set((availableFields || []).map((f) => f.key.toUpperCase()));
+  const tokens = [];
+  // Groups: 1=ws, 2=string-literal, 3=number, 4=identifier, 5=operator/paren/comma
+  const re = /(\s+)|('[^']*'|"[^"]*")|(\d+(?:\.\d+)?)|([A-Za-z_][A-Za-z0-9_]*)|([+\-*/=<>!%]+|[(),])/g;
+  let last = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) tokens.push({ text: text.slice(last, m.index), type: 'unknown' });
+    const [full, ws, str, num, ident, op] = m;
+    if (ws)    { tokens.push({ text: full, type: 'ws' }); }
+    else if (str)   { tokens.push({ text: full, type: 'string' }); }
+    else if (num)   { tokens.push({ text: full, type: 'number' }); }
+    else if (ident) {
+      const u = ident.toUpperCase();
+      if (FORMULA_FN_SET.has(u))       tokens.push({ text: full, type: 'fn' });
+      else if (FORMULA_KEYWORDS.has(u)) tokens.push({ text: full, type: 'keyword' });
+      else if (fieldSet.has(u))         tokens.push({ text: full, type: 'field' });
+      else                              tokens.push({ text: full, type: 'ident' });
+    } else if (op) {
+      const t = (op === '(' || op === ')') ? 'paren' : op === ',' ? 'comma' : 'op';
+      tokens.push({ text: full, type: t });
+    } else {
+      tokens.push({ text: full, type: 'unknown' });
+    }
+    last = m.index + full.length;
+  }
+  if (last < text.length) tokens.push({ text: text.slice(last), type: 'unknown' });
+  return tokens;
+}
+
+// ── FormulaEditor — typeahead + syntax-highlighted textarea ──────────────
+function FormulaEditor({ value, onChange, availableFields, placeholder, autoFocus }) {
+  const taRef = useRef(null);
+  const [dropdown, setDropdown] = useState(null); // { items, selectedIdx, wordStart }
+
+  function getWordAtCursor(text, cursor) {
+    let start = cursor;
+    while (start > 0 && /[A-Za-z0-9_]/.test(text[start - 1])) start--;
+    return { word: text.slice(start, cursor), start };
+  }
+
+  function getSuggestions(partial) {
+    const q = partial.toUpperCase();
+    if (!q) return [];
+    const fns = FORMULA_FUNCTIONS
+      .filter((f) => f.name.startsWith(q))
+      .map((f) => ({ type: 'fn', name: f.name, desc: f.desc, sig: f.signature }));
+    const fields = (availableFields || [])
+      .filter((f) => f.key.toUpperCase().startsWith(q))
+      .map((f) => ({ type: 'field', name: f.key, desc: f.label || f.key }));
+    return [...fns, ...fields].slice(0, 10);
+  }
+
+  const insertSuggestion = useCallback((item) => {
+    if (!item || !taRef.current) return;
+    const ta = taRef.current;
+    const cursor = ta.selectionStart;
+    const { word, start } = getWordAtCursor(value, cursor);
+    // Functions get an opening paren appended; fields are inserted as-is
+    const insert = item.type === 'fn' ? item.name + '(' : item.name;
+    const newVal = value.slice(0, start) + insert + value.slice(start + word.length);
+    onChange(newVal);
+    setDropdown(null);
+    requestAnimationFrame(() => {
+      if (!taRef.current) return;
+      taRef.current.focus();
+      const pos = start + insert.length;
+      taRef.current.setSelectionRange(pos, pos);
+    });
+  }, [value, onChange]);
+
+  const handleChange = (e) => {
+    const v = e.target.value;
+    onChange(v);
+    const cursor = e.target.selectionStart;
+    const { word, start } = getWordAtCursor(v, cursor);
+    if (word.length >= 1) {
+      const items = getSuggestions(word);
+      setDropdown(items.length ? { items, selectedIdx: 0, wordStart: start } : null);
+    } else {
+      setDropdown(null);
+    }
+  };
+
+  const handleKeyDown = (e) => {
+    if (!dropdown) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); setDropdown((d) => d && ({ ...d, selectedIdx: Math.min(d.selectedIdx + 1, d.items.length - 1) })); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setDropdown((d) => d && ({ ...d, selectedIdx: Math.max(d.selectedIdx - 1, 0) })); }
+    else if (e.key === 'Enter' || e.key === 'Tab') { if (dropdown.items[dropdown.selectedIdx]) { e.preventDefault(); insertSuggestion(dropdown.items[dropdown.selectedIdx]); } }
+    else if (e.key === 'Escape') { setDropdown(null); }
+  };
+
+  const tokens = tokenizeFormula(value || '', availableFields);
+
+  return (
+    <div
+      className="formula-editor"
+      onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setDropdown(null); }}
+    >
+      <div className="formula-editor-inner">
+        {/* Highlighted layer — rendered behind the transparent textarea */}
+        <pre className="formula-highlight" aria-hidden="true">
+          {tokens.map((tok, i) => (
+            <span key={i} className={`ftok ftok-${tok.type}`}>{tok.text}</span>
+          ))}
+          {/* Trailing space keeps height consistent when value ends with newline */}
+          {' '}
+        </pre>
+        <textarea
+          ref={taRef}
+          className="formula-textarea"
+          value={value}
+          onChange={handleChange}
+          onKeyDown={handleKeyDown}
+          placeholder={placeholder}
+          spellCheck={false}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          autoFocus={autoFocus}
+        />
+      </div>
+      {dropdown && (
+        <div className="formula-dropdown" role="listbox">
+          {dropdown.items.map((item, idx) => (
+            <button
+              key={item.name + item.type}
+              role="option"
+              aria-selected={idx === dropdown.selectedIdx}
+              className={`formula-dd-item ${idx === dropdown.selectedIdx ? 'selected' : ''}`}
+              onMouseDown={(e) => { e.preventDefault(); insertSuggestion(item); }}
+              tabIndex={-1}
+            >
+              <span className={`fdd-badge fdd-badge-${item.type}`}>
+                {item.type === 'fn' ? 'fn' : 'field'}
+              </span>
+              <span className="fdd-name">{item.name}</span>
+              {item.type === 'fn' && <span className="fdd-sig">{item.sig}</span>}
+              <span className="fdd-desc">{item.desc}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── React Flow custom node ──────────────────────────────────────────────────
 function EntityCardNode({ data }) {
   const {
     id, label, source, primary, fields,
-    isJoined, hiddenFields, fieldDisplayNames, activeField,
-    onSelectField, toggleHidden,
+    isJoined, isSelected, hiddenFields, fieldDisplayNames,
+    onSelectField, toggleHidden, onAddCalcField,
   } = data;
+  const activeField = useContext(ActiveFieldContext);
 
   return (
-    <article className={`ecard ${primary ? 'primary' : ''} ${isJoined ? '' : 'unjoined'}`}>
+    <article className={`ecard ${primary ? 'primary' : ''} ${isJoined ? '' : 'unjoined'} ${isSelected ? 'selected' : ''}`}>
       <header className="ec-hd draggable">
         <span className="ec-name">{label}</span>
         <span className="ec-src">{source}</span>
@@ -388,7 +612,7 @@ function EntityCardNode({ data }) {
           );
         })}
       </div>
-      <button className="plain-btn ec-add-calc nodrag nopan">+ Add calculated field</button>
+      <button className="plain-btn ec-add-calc nodrag nopan" onClick={() => onAddCalcField && onAddCalcField(id)}>+ Add calculated field</button>
       <Handle type="source" position={Position.Right} id={`${id}-src`} className="entity-handle" />
       <Handle type="target" position={Position.Left} id={`${id}-tgt`} className="entity-handle" />
     </article>
@@ -452,12 +676,11 @@ function FieldPopupLayer({
           {fieldMeta.calc && (
             <section className="sp-section">
               <p className="sp-lbl">Formula</p>
-              <textarea
-                className="fi-ta fi-formula"
+              <FormulaEditor
                 value={fieldFormulas[fieldMeta.key] ?? (fieldMeta.formula || '')}
-                onChange={(e) => setFieldFormulas((prev) => ({ ...prev, [fieldMeta.key]: e.target.value }))}
+                onChange={(v) => setFieldFormulas((prev) => ({ ...prev, [fieldMeta.key]: v }))}
+                availableFields={canvasEntities.flatMap((e) => e.fields)}
                 placeholder="e.g. amount - unit_cost"
-                spellCheck={false}
               />
             </section>
           )}
@@ -485,6 +708,96 @@ function FieldPopupLayer({
           </section>
         </div>
     </div>
+  );
+}
+
+// ── Calculated field modal ────────────────────────────────────────────────
+function CalcFieldModal({ isOpen, onClose, onSave, availableFields }) {
+  const [fieldName, setFieldName] = useState('');
+  const [formula, setFormula] = useState('');
+  const [agg, setAgg] = useState('SUM');
+
+  const resetState = () => { setFieldName(''); setFormula(''); setAgg('SUM'); };
+
+  const handleSave = () => {
+    if (!fieldName.trim()) return;
+    onSave({ name: fieldName.trim(), formula, agg });
+    resetState();
+  };
+
+  const handleClose = () => { onClose(); resetState(); };
+
+  return (
+    <Dialog.Root open={isOpen} onOpenChange={(open) => { if (!open) handleClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Backdrop className="dialog-backdrop" />
+        <Dialog.Viewport className="dialog-viewport">
+          <Dialog.Popup className="dialog-popup calc-field-modal">
+            <div className="calc-field-header">
+              <Dialog.Title className="modal-title">Add calculated field</Dialog.Title>
+              <Dialog.Close className="plain-btn canvas-popup-close">×</Dialog.Close>
+            </div>
+            <div className="calc-field-body">
+              <section className="sp-section">
+                <p className="sp-lbl">Field name</p>
+                <input
+                  className="fi-inp"
+                  value={fieldName}
+                  onChange={(e) => setFieldName(e.target.value)}
+                  placeholder="e.g. margin_pct"
+                  autoFocus
+                />
+              </section>
+              <section className="sp-section">
+                <p className="sp-lbl">Formula</p>
+                <FormulaEditor
+                  value={formula}
+                  onChange={setFormula}
+                  availableFields={availableFields}
+                  placeholder="e.g. amount - unit_cost"
+                />
+              </section>
+              <section className="sp-section">
+                <p className="sp-lbl">Aggregation</p>
+                <Select.Root
+                  value={agg}
+                  onValueChange={setAgg}
+                  items={['SUM','AVG','MIN','MAX','COUNT']}
+                >
+                  <Select.Trigger className="bu-trigger calc-agg-trigger">
+                    <Select.Value />
+                    <Select.Icon className="bu-icon">▾</Select.Icon>
+                  </Select.Trigger>
+                  <Select.Portal>
+                    <Select.Positioner>
+                      <Select.Popup className="bu-popup">
+                        <Select.List>
+                          {['SUM','AVG','MIN','MAX','COUNT'].map((a) => (
+                            <Select.Item key={a} value={a} className="bu-item">
+                              <Select.ItemText>{a}</Select.ItemText>
+                            </Select.Item>
+                          ))}
+                        </Select.List>
+                      </Select.Popup>
+                    </Select.Positioner>
+                  </Select.Portal>
+                </Select.Root>
+              </section>
+            </div>
+            <div className="calc-field-footer">
+              <button className="btn" onClick={handleClose}>Cancel</button>
+              <button
+                className="btn btn-primary"
+                onClick={handleSave}
+                disabled={!fieldName.trim()}
+              >
+                Save field
+              </button>
+            </div>
+          </Dialog.Popup>
+        </Dialog.Viewport>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
@@ -632,6 +945,7 @@ function EditorCanvas({
   selectField, selectJoin, toggleHidden, createDragJoin,
   closeInspectorPopup, hoveredJoinType, setHoveredJoinType,
   leftCollapsed, setLeftCollapsed, rightCollapsed, setRightCollapsed, rightMode,
+  onAddCalcField, activeTableId, setActiveTableId,
 }) {
   const { fitView } = useReactFlow();
   const zoom = useStore((s) => s.transform[2]);
@@ -662,24 +976,57 @@ function EditorCanvas({
     setJoins((prev) => ({ ...prev, [joinId]: { ...prev[joinId], [key]: value } }));
   }, [setJoins]);
 
-  const rfNodes = useMemo(() =>
+  const buildNodes = useCallback((posOverride) =>
     canvasEntities.map((e) => ({
       id: e.id,
       type: 'entity',
-      position: entityPositions[e.id] ?? { x: 100, y: 100 },
+      position: (posOverride ?? entityPositions)[e.id] ?? { x: 100, y: 100 },
       dragHandle: '.ec-hd',
       data: {
         ...e,
         isJoined: joinedEntityIds.has(e.id),
         hiddenFields,
         fieldDisplayNames,
-        activeField,
+        isSelected: activeTableId === e.id,
         onSelectField: selectField,
         toggleHidden,
+        onAddCalcField,
       },
     })),
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  [canvasEntities, entityPositions, joinedEntityIds, hiddenFields, fieldDisplayNames, activeField]);
+  [canvasEntities, entityPositions, joinedEntityIds, hiddenFields, fieldDisplayNames, activeTableId]);
+
+  const [rfNodes, setRfNodes, onNodesChange] = useNodesState(() => buildNodes());
+
+  // Sync node data and structure when anything other than drag position changes.
+  // Preserve in-flight drag positions from internal RF state (posMap).
+  useEffect(() => {
+    setRfNodes((prev) => {
+      const posMap = Object.fromEntries(prev.map((n) => [n.id, n.position]));
+      return buildNodes(posMap);
+    });
+  // buildNodes captures all relevant deps
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [buildNodes]);
+
+  // Sync authoritative positions (layout, initial load) into RF internal state.
+  useEffect(() => {
+    setRfNodes((prev) =>
+      prev.map((n) => ({ ...n, position: entityPositions[n.id] ?? n.position }))
+    );
+  }, [entityPositions, setRfNodes]);
+
+  const onNodeClick = useCallback((_, node) => {
+    setActiveTableId(node.id);
+  }, [setActiveTableId]);
+
+  const onNodeDragStart = useCallback((_, node) => {
+    setActiveTableId(node.id);
+  }, [setActiveTableId]);
+
+  const onNodeDragStop = useCallback((_, node) => {
+    setEntityPositions((prev) => ({ ...prev, [node.id]: node.position }));
+  }, [setEntityPositions]);
 
   const rfEdges = useMemo(() =>
     Object.values(joins).map((j) => ({
@@ -702,14 +1049,6 @@ function EditorCanvas({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   [joins, activeJoin, hoveredJoinType]);
 
-  const onNodesChange = useCallback((changes) => {
-    changes.forEach((c) => {
-      if (c.type === 'position' && c.position && !c.dragging) {
-        setEntityPositions((prev) => ({ ...prev, [c.id]: c.position }));
-      }
-    });
-  }, [setEntityPositions]);
-
   const onConnect = useCallback((conn) => {
     createDragJoin(conn.source, conn.target);
   }, [createDragJoin]);
@@ -723,18 +1062,15 @@ function EditorCanvas({
     );
   }, [joins]);
 
-  // Positions are pre-computed via Dagre in the useState initializer, so we only need
-  // to fitView once after RF has measured all nodes (handles bounding boxes ready).
-  const nodesInitialized = useNodesInitialized();
-  const didInitialFit = useRef(false);
-  useEffect(() => {
-    if (nodesInitialized && !didInitialFit.current) {
-      didInitialFit.current = true;
-      fitView({ padding: 0.15, duration: 350, maxZoom: 1 });
-    }
-  }, [nodesInitialized, fitView]);
+  // onInit fires after RF mounts and has measured all nodes.
+  // Since entityPositions is pre-populated with Dagre coords, the first render
+  // already has correct positions — fitView can run immediately in onInit.
+  const onInit = useCallback((instance) => {
+    instance.fitView({ padding: 0.15, duration: 0, maxZoom: 1 });
+  }, []);
 
   return (
+    <ActiveFieldContext.Provider value={activeField}>
     <div className="canvas-wrap">
       <ReactFlow
         nodes={rfNodes}
@@ -742,13 +1078,17 @@ function EditorCanvas({
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         onNodesChange={onNodesChange}
+        onNodeClick={onNodeClick}
+        onNodeDragStart={onNodeDragStart}
+        onNodeDragStop={onNodeDragStop}
         onConnect={onConnect}
         isValidConnection={isValidConnection}
-        onPaneClick={() => { selectJoin(null); selectField(null, null); }}
+        onPaneClick={() => { selectJoin(null); selectField(null, null); setActiveTableId(null); }}
         defaultEdgeOptions={{ type: 'join' }}
         proOptions={{ hideAttribution: true }}
         elevateEdgesOnSelect
         maxZoom={1}
+        onInit={onInit}
       >
         <Background variant="dots" gap={20} size={1} color="rgba(0,0,0,0.1)" />
       </ReactFlow>
@@ -784,6 +1124,7 @@ function EditorCanvas({
         </button>
       </div>
     </div>
+    </ActiveFieldContext.Provider>
   );
 }
 
@@ -796,9 +1137,14 @@ function App() {
   const [rightMode, setRightMode] = useState('sql');
   const [activeJoin, setActiveJoin] = useState(null);
   const [activeField, setActiveField] = useState(null);
-  const [fieldDescriptions, setFieldDescriptions] = useState({});
+  const [fieldDescriptions, setFieldDescriptions] = useState(() =>
+    Object.fromEntries(
+      INITIAL_ENTITIES.flatMap((e) => e.fields.filter((f) => f.semanticDesc).map((f) => [f.key, f.semanticDesc]))
+    )
+  );
   const [fieldDisplayNames, setFieldDisplayNames] = useState({});
-  const [fieldFormulas, setFieldFormulas] = useState({});
+  const [fieldFormulas, setFieldFormulas] = useState({ revenue_net: 'amount - unit_cost' });
+  const [addCalcFieldEntityId, setAddCalcFieldEntityId] = useState(null);
   const [hiddenFields, setHiddenFields] = useState(new Set());
   const [aiOpen, setAiOpen] = useState(false);
   const [inspectView, setInspectView] = useState('visual');
@@ -843,6 +1189,12 @@ function App() {
   const [expandedSources, setExpandedSources] = useState(new Set());
   const [addModalSearch, setAddModalSearch] = useState('');
   const [activeTableId, setActiveTableId] = useState(null);
+
+  useEffect(() => {
+    const handler = (e) => { if (e.key === 'Escape') setActiveTableId(null); };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
 
   // AI command bar
   const [aiBarOpen, setAiBarOpen] = useState(false);
@@ -965,12 +1317,15 @@ function App() {
   const badgeClass = stage === 'production' ? 'badge-prod' : stage === 'dev' ? 'badge-dev' : 'badge-draft';
 
   const visibleFields = useMemo(() => {
+    // FK columns on the "to" side of a join duplicate the "from" side — exclude them.
+    const joinedFKs = new Set(Object.values(joins).map((j) => `${j.toEntity}.${j.to.split('.')[1]}`));
     return canvasEntities.flatMap((entity) =>
       entity.fields
         .filter((field) => !hiddenFields.has(field.key))
-        .map((field) => ({ key: field.key, entity: entity.id, label: fieldDisplayNames[field.key] || field.label }))
+        .filter((field) => !joinedFKs.has(`${entity.id}.${field.key}`))
+        .map((field) => ({ key: field.key, entity: entity.id, label: fieldDisplayNames[field.key] || field.label, type: field.type }))
     );
-  }, [canvasEntities, fieldDisplayNames, hiddenFields]);
+  }, [canvasEntities, fieldDisplayNames, hiddenFields, joins]);
 
   const currentSql = useMemo(() => {
     const columns = visibleFields
@@ -1040,6 +1395,114 @@ function App() {
     return lines.join('\n');
   }, [stage, visibleFields, canvasEntities, hiddenFields, fieldDisplayNames, fieldDescriptions, joins]);
 
+  const inspectJson = useMemo(() => {
+    // Build FK relationship test lookup: { 'entityId.fieldKey': [{ to, field, join_type }] }
+    const fkTests = {};
+    Object.values(joins).forEach((j) => {
+      const [fromEntity, fromField] = j.from.split('.');
+      const [toEntity, toField] = j.to.split('.');
+      const toEntityMeta = canvasEntities.find((e) => e.id === toEntity);
+      if (!toEntityMeta) return;
+      const toSource = dbSourceName(toEntityMeta.dbName);
+      const key = `${fromEntity}.${fromField}`;
+      if (!fkTests[key]) fkTests[key] = [];
+      fkTests[key].push({
+        relationships: {
+          to: `source('${toSource}', '${toEntity}')`,
+          field: toField,
+          meta: { join_type: JOIN_MAP[j.type] },
+        },
+      });
+    });
+
+    // Group entities by database → sources
+    const sourceGroups = {};
+    canvasEntities.forEach((entity) => {
+      const srcName = dbSourceName(entity.dbName);
+      if (!sourceGroups[srcName]) sourceGroups[srcName] = { name: srcName, database: entity.dbName, tables: [] };
+      const columns = entity.fields.map((f) => {
+        const name = fieldDisplayNames[f.key] || f.key;
+        const tests = [];
+        if (f.isKey) tests.push('unique', 'not_null');
+        const relTests = fkTests[`${entity.id}.${f.key}`] || [];
+        relTests.forEach((t) => tests.push(t));
+        const desc = fieldDescriptions[f.key] || f.semanticDesc;
+        return {
+          name,
+          ...(fieldDisplayNames[f.key] ? { original_name: f.key } : {}),
+          data_type: DBT_TYPE_MAP[f.type] || f.type,
+          ...(desc ? { description: desc } : {}),
+          ...(hiddenFields.has(f.key) ? { meta: { hidden: true } } : {}),
+          ...(tests.length ? { tests } : {}),
+        };
+      });
+      sourceGroups[srcName].tables.push({
+        name: entity.id,
+        description: entity.definition,
+        ...(entity.primary ? { meta: { primary: true } } : {}),
+        columns,
+      });
+    });
+
+    // Composed model columns: visible non-measure fields from all entities
+    const modelColumns = canvasEntities.flatMap((entity) =>
+      entity.fields
+        .filter((f) => !hiddenFields.has(f.key) && f.role !== 'MEASURE')
+        .map((f) => {
+          const name = fieldDisplayNames[f.key] || f.key;
+          const desc = fieldDescriptions[f.key] || f.semanticDesc;
+          return {
+            name,
+            data_type: DBT_TYPE_MAP[f.type] || f.type,
+            ...(desc ? { description: desc } : {}),
+            meta: {
+              source: `${entity.id}.${f.key}`,
+              ...(f.isKey ? { is_key: true } : {}),
+            },
+          };
+        })
+    );
+
+    // Metrics: visible measure fields
+    const metrics = canvasEntities.flatMap((entity) =>
+      entity.fields
+        .filter((f) => !hiddenFields.has(f.key) && f.role === 'MEASURE')
+        .map((f) => {
+          const name = fieldDisplayNames[f.key] || f.key;
+          const desc = fieldDescriptions[f.key] || f.semanticDesc;
+          return {
+            name,
+            label: titleCase(name.replace(/_/g, ' ')),
+            model: "ref('sales_overview')",
+            calculation_method: f.calc ? 'derived' : (DBT_AGG_MAP[f.agg] || 'sum'),
+            expression: f.key,
+            ...(f.calc && fieldFormulas[f.key] ? { formula: fieldFormulas[f.key] } : {}),
+            ...(desc ? { description: desc } : {}),
+            meta: { source: `${entity.id}.${f.key}` },
+          };
+        })
+    );
+
+    const obj = {
+      version: 2,
+      sources: Object.values(sourceGroups),
+      models: [
+        {
+          name: 'sales_overview',
+          description: 'Orders joined with customers and products from two separate databases. Use to analyze revenue by customer segment, region, and product category.',
+          config: {
+            materialized: 'view',
+            tags: [stage],
+          },
+          meta: { analytics_scope: 'Individual order line items' },
+          columns: modelColumns,
+        },
+      ],
+      metrics,
+    };
+    return JSON.stringify(obj, null, 2);
+  }, [stage, canvasEntities, hiddenFields, fieldDisplayNames, fieldDescriptions, fieldFormulas, joins]);
+
   const filteredModels = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return models;
@@ -1073,6 +1536,21 @@ function App() {
   };
 
   const closeInspectorPopup = () => { setActiveField(null); setActiveJoin(null); };
+
+  const handleSaveCalcField = ({ name, formula, agg }) => {
+    const entityId = addCalcFieldEntityId;
+    if (!entityId) return;
+    const key = name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+    setCanvasEntities((prev) =>
+      prev.map((e) =>
+        e.id === entityId
+          ? { ...e, fields: [...e.fields, { key, label: name, type: 'fx', calc: true, role: 'MEASURE', agg }] }
+          : e
+      )
+    );
+    setFieldFormulas((prev) => ({ ...prev, [key]: formula }));
+    setAddCalcFieldEntityId(null);
+  };
 
   // ── Filter modal sources by search ──────────────────────────────────────
   const filteredGroupedSources = useMemo(() => {
@@ -1332,7 +1810,7 @@ function App() {
             <div className="kanban">
               {[
                 ['Draft', filteredModels.draft],
-                ['Dev', filteredModels.dev],
+                ['Testing', filteredModels.dev],
                 ['Production', filteredModels.production],
               ].map(([label, list]) => (
                 <div key={label}>
@@ -1344,20 +1822,22 @@ function App() {
                     const usageScore = usageScoreFromCount(model.uses);
                     return (
                       <button key={model.id} className="plain-btn mcard" onClick={() => { setView('editor'); setStage(model.stage); }}>
-                        <div className="mcard-name">{model.name}</div>
-                        <div className="mcard-desc">{model.desc}</div>
-                        <div className="mcard-foot">
-                          <span className="badge badge-neutral">{model.entities} entities</span>
-                          <span className="badge badge-neutral">{model.joins} joins</span>
-                          <span className={`badge ${model.stage === 'production' ? 'badge-prod' : model.stage === 'dev' ? 'badge-dev' : 'badge-draft'}`}>{model.stage}</span>
+                        <div className="mcard-head">
+                          <div className="mcard-name">{model.name}</div>
                           <span className="mcard-usage" aria-label={`Usage score ${usageScore} out of 5 from ${model.uses} uses`}>
                             <span className="mcard-usage-dots" aria-hidden="true">
                               {Array.from({ length: 5 }, (_, i) => (
                                 <span key={`${model.id}-usage-${i}`} className={`mcard-usage-dot ${i < usageScore ? 'is-filled' : ''}`} />
                               ))}
                             </span>
-                            <span className="mcard-uses">{model.uses} uses</span>
+                            <span className="mcard-uses">{model.uses}</span>
                           </span>
+                        </div>
+                        <div className="mcard-desc">{model.desc}</div>
+                        <div className="mcard-foot">
+                          <span className="badge badge-neutral">{model.entities} entities</span>
+                          <span className="badge badge-neutral">{model.joins} joins</span>
+                          <span className={`badge ${model.stage === 'production' ? 'badge-prod' : model.stage === 'dev' ? 'badge-dev' : 'badge-draft'}`}>{model.stage === 'dev' ? 'testing' : model.stage}</span>
                         </div>
                       </button>
                     );
@@ -1463,24 +1943,28 @@ function App() {
                     <div className="src-group-hd">
                       <span>▾ {group.name}</span>
                     </div>
-                    {group.tables.map((tableId) => (
-                      <div
-                        key={tableId}
-                        className={`tbl-row ${activeTableId === tableId ? 'active' : ''}`}
-                        onClick={() => setActiveTableId((prev) => (prev === tableId ? null : tableId))}
-                        role="button"
-                        tabIndex={0}
-                        onKeyDown={(e) => { if (e.key === 'Enter') setActiveTableId((prev) => (prev === tableId ? null : tableId)); }}
-                      >
-                        <span className="tbl-row-name">{tableId}</span>
-                        <button
-                          className="plain-btn tbl-row-remove"
-                          onClick={(e) => { e.stopPropagation(); handleRemoveFromCanvas(tableId); }}
-                          aria-label={`Remove ${tableId}`}
-                          title={`Remove ${tableId}`}
-                        >×</button>
-                      </div>
-                    ))}
+                    {group.tables.map((tableId) => {
+                      const entity = canvasEntities.find((e) => e.id === tableId);
+                      return (
+                        <div
+                          key={tableId}
+                          className={`tbl-row ${activeTableId === tableId ? 'active' : ''}`}
+                          onClick={() => setActiveTableId(tableId)}
+                          role="button"
+                          tabIndex={0}
+                          onKeyDown={(e) => { if (e.key === 'Enter') setActiveTableId(tableId); }}
+                        >
+                          <span className="tbl-row-name">{tableId}</span>
+                          {entity?.primary && <span className="tbl-primary-pill">primary</span>}
+                          <button
+                            className="plain-btn tbl-row-remove"
+                            onClick={(e) => { e.stopPropagation(); handleRemoveFromCanvas(tableId); }}
+                            aria-label={`Remove ${tableId}`}
+                            title={`Remove ${tableId}`}
+                          >×</button>
+                        </div>
+                      );
+                    })}
                   </div>
                 ))}
               </div>
@@ -1515,6 +1999,9 @@ function App() {
                 rightCollapsed={rightCollapsed}
                 setRightCollapsed={setRightCollapsed}
                 rightMode={rightMode}
+                onAddCalcField={(entityId) => setAddCalcFieldEntityId(entityId)}
+                activeTableId={activeTableId}
+                setActiveTableId={setActiveTableId}
               />
             </ReactFlowProvider>
 
@@ -1565,16 +2052,22 @@ function App() {
             <div className="prev-scroll">
               <table className="ptab">
                 <thead>
-                  <tr>{visibleFields.map((field) => (<th key={`${field.entity}-${field.key}`} className={activeField?.fieldKey === field.key ? 'active-col' : ''}>{field.label}</th>))}</tr>
+                  <tr>{visibleFields.map((field) => {
+                    const isNum = ['#', '$', 'fx'].includes(field.type);
+                    return <th key={`${field.entity}-${field.key}`} className={`${isNum ? 'col-num' : ''} ${activeField?.fieldKey === field.key ? 'active-col' : ''}`}>{field.label}</th>;
+                  })}</tr>
                 </thead>
                 <tbody>
                   {PREVIEW_ROWS.map((row) => (
                     <tr key={row.order_id}>
-                      {visibleFields.map((field) => (
-                        <td key={`${row.order_id}-${field.entity}-${field.key}`} className={activeField?.fieldKey === field.key ? 'active-col' : ''}>
-                          {row[field.key] === null ? <span className="null-val">null</span> : row[field.key]}
-                        </td>
-                      ))}
+                      {visibleFields.map((field) => {
+                        const isNum = ['#', '$', 'fx'].includes(field.type);
+                        return (
+                          <td key={`${row.order_id}-${field.entity}-${field.key}`} className={`${isNum ? 'col-num' : ''} ${activeField?.fieldKey === field.key ? 'active-col' : ''}`}>
+                            {row[field.key] === null ? <span className="null-val">null</span> : row[field.key]}
+                          </td>
+                        );
+                      })}
                     </tr>
                   ))}
                 </tbody>
@@ -1594,6 +2087,7 @@ function App() {
                   <div className="insp-view-toggle">
                     <button className={`insp-toggle-btn ${inspectView === 'visual' ? 'active' : ''}`} onClick={() => setInspectView('visual')}>Visual</button>
                     <button className={`insp-toggle-btn ${inspectView === 'markdown' ? 'active' : ''}`} onClick={() => setInspectView('markdown')}>Markdown</button>
+                    <button className={`insp-toggle-btn ${inspectView === 'json' ? 'active' : ''}`} onClick={() => setInspectView('json')}>JSON</button>
                   </div>
                 </div>
                 <p>Orders joined with customers and products from two separate databases. Use to analyze revenue by customer segment, region, and product category.</p>
@@ -1610,6 +2104,12 @@ function App() {
 
               {inspectView === 'markdown' ? (
                 <div className="insp-md-wrap"><pre className="insp-md-pre">{inspectMarkdown}</pre></div>
+              ) : null}
+
+              {inspectView === 'json' ? (
+                <div className="insp-md-wrap">
+                  <JsonHighlight json={inspectJson} />
+                </div>
               ) : null}
 
               {inspectView === 'visual' ? <h3 className="insp-section-hd">Entities & fields</h3> : null}
@@ -1699,18 +2199,22 @@ function App() {
         </section>
       ) : null}
 
+      {/* Calculated field modal */}
+      <CalcFieldModal
+        isOpen={addCalcFieldEntityId !== null}
+        onClose={() => setAddCalcFieldEntityId(null)}
+        onSave={handleSaveCalcField}
+        availableFields={canvasEntities.flatMap((e) => e.fields)}
+      />
+
       {/* AI chat modal */}
       <Dialog.Root open={aiModalOpen} onOpenChange={(open) => { if (!open) { setAiModalOpen(false); setAiBarOpen(false); } }}>
         <Dialog.Portal>
           <Dialog.Backdrop className="ai-chat-backdrop" />
           <Dialog.Viewport className="ai-chat-viewport">
             <Dialog.Popup className="ai-chat-modal">
-              {/* Header */}
-              <div className="ai-chat-hd">
-                <span className="ai-chat-sparkle">✦</span>
-                <Dialog.Title className="ai-chat-title">AI Model Assistant</Dialog.Title>
-                <Dialog.Close className="plain-btn ai-chat-close">✕</Dialog.Close>
-              </div>
+              <Dialog.Title className="sr-only">AI Model Assistant</Dialog.Title>
+              <Dialog.Close className="plain-btn ai-chat-close-float">✕</Dialog.Close>
               {/* Messages */}
               <div className="ai-chat-messages" ref={aiPanelRef}>
                 {aiBarMessages.map((msg, i) =>
