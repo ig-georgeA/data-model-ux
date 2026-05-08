@@ -443,6 +443,13 @@
   fill: none;
 }
 
+/* Read-only: warm brown/stone tone — double-class for specificity over .join-edge-path */
+.join-edge-path.join-edge-ro {
+  stroke: #7d6348;
+  stroke-opacity: 0.6;
+  stroke-width: 1.5;
+}
+
 /* Drag-to-connect preview line */
 .react-flow__connection-line {
   stroke: var(--blue);
@@ -658,8 +665,8 @@
   padding: 8px 10px 6px;
   border-bottom: 1px solid var(--border);
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  gap: 4px;
 }
 
 .ec-hd.draggable {
@@ -674,11 +681,17 @@
 .ec-name {
   font-size: 13px;
   font-weight: 600;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .ec-src {
-  font-size: 13px;
+  font-size: 11.5px;
   color: var(--text-3);
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
 .frow {
@@ -820,6 +833,22 @@
   box-shadow: 0 12px 28px rgba(15, 79, 209, 0.22);
 }
 
+/* Read-only join node — double-class beats .jnode:hover specificity */
+.jnode.jnode-ro {
+  border-color: #8b7055;
+  color: #5e4433;
+  background: var(--surface);
+  box-shadow: 0 2px 8px rgba(100, 70, 40, 0.18);
+}
+
+.jnode.jnode-ro:hover,
+.jnode.jnode-ro.active {
+  color: #3e2c1e;
+  background: #f5ede3;
+  border-color: #6b5040;
+  box-shadow: 0 4px 14px rgba(80, 50, 25, 0.22);
+}
+
 .jnode .join-type-glyph {
   width: 16px;
   height: 10px;
@@ -896,14 +925,13 @@
 }
 
 .canvas-popup-join {
-  width: 472px;
-  min-height: 360px;
+  width: 340px;
 }
 
 
 .join-type-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(32px, 1fr));
+  grid-template-columns: repeat(3, 1fr);
   gap: 6px;
 }
 
@@ -912,9 +940,9 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 4px;
-  min-height: 68px;
-  padding: 8px 4px 7px;
+  gap: 3px;
+  min-height: 62px;
+  padding: 7px 4px 6px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--surface);
@@ -980,6 +1008,51 @@
   font-size: 13px;
   line-height: 1.5;
   color: var(--text-2);
+}
+
+/* ── Join read-only popup ─────────────────────────────────────────────────── */
+.join-ro-section { padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.join-ro-section:last-of-type { border-bottom: none; }
+
+.join-ro-type-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.join-ro-type-row .join-type-glyph { flex-shrink: 0; }
+.join-ro-type-name { font-size: 14px; font-weight: 600; color: var(--text); }
+.join-ro-type-sql  { font-size: 11.5px; color: var(--text-3); font-family: 'JetBrains Mono', monospace; margin-top: 2px; }
+.join-ro-implication { margin: 0; font-size: 13px; color: var(--text-2); line-height: 1.5; }
+
+.join-ro-map {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.join-ro-key {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text);
+}
+.join-ro-desc { margin: 6px 0 0; font-size: 13px; color: var(--text-2); line-height: 1.5; }
+
+.join-ro-edit-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 16px 12px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.btn-sm {
+  font-size: 12px;
+  padding: 4px 10px;
 }
 
 .float-btn {
@@ -3284,4 +3357,986 @@
 
 .ds-modal-body .ds-table-row {
   padding-left: 40px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   NEW CATALOG LAYOUT — Two-pane: left list + right detail
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Nav brand sub-label */
+.nav-brand-sub {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-3);
+  margin-left: 4px;
+  letter-spacing: 0;
+}
+
+/* Two-pane shell */
+.catalog-layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ── Left pane ────────────────────────────────────────────────────────────── */
+.cat-left-pane {
+  width: 300px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.cat-left-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 12px 8px;
+  flex-shrink: 0;
+}
+
+.cat-left-search-wrap {
+  flex: 1;
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.cat-search-icon {
+  position: absolute;
+  left: 8px;
+  width: 13px;
+  height: 13px;
+  color: var(--text-3);
+  pointer-events: none;
+}
+
+.cat-left-search {
+  width: 100%;
+  border: 1px solid var(--border-2);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 6px 8px 6px 26px;
+  font-size: 13px;
+  font: inherit;
+}
+
+.cat-left-search::placeholder { color: var(--text-3); }
+.cat-left-search:focus { outline: none; border-color: var(--blue); }
+
+.cat-add-btn {
+  flex-shrink: 0;
+  font-size: 13px;
+  padding: 6px 10px;
+  white-space: nowrap;
+}
+
+/* ── Object type tabs ─────────────────────────────────────────────────────── */
+.obj-type-tabs {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  padding: 0 4px;
+}
+
+.obj-type-tab {
+  flex: 1;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 8px 4px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: color 0.1s, border-color 0.1s;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  margin-bottom: -1px;
+}
+
+.obj-type-tab:hover { color: var(--text); }
+.obj-type-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--blue);
+  font-weight: 600;
+}
+
+.obj-type-count {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1px 5px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-3);
+  line-height: 1.2;
+}
+
+/* ── Type description ─────────────────────────────────────────────────────── */
+.obj-type-desc {
+  padding: 8px 12px 6px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  line-height: 1.5;
+  flex-shrink: 0;
+  margin: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ── List ─────────────────────────────────────────────────────────────────── */
+.cat-left-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.obj-list-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  border-left: 3px solid transparent;
+  transition: background 0.1s, border-color 0.1s;
+  user-select: none;
+}
+
+.obj-list-item:hover { background: var(--surface-2); }
+
+.obj-list-item.selected {
+  background: var(--blue-bg);
+  border-left-color: var(--blue);
+}
+
+.obj-list-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.obj-list-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.obj-list-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.obj-list-source,
+.obj-list-meta {
+  font-size: 11.5px;
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.obj-list-meta { color: var(--text-3); }
+
+.obj-list-right {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.obj-list-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid var(--text-3);
+  background: transparent;
+  flex-shrink: 0;
+  cursor: default;
+}
+
+.obj-list-dot.used {
+  background: var(--green);
+  border-color: var(--green);
+}
+
+.obj-list-fields {
+  font-size: 11.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+/* 3-dot context menu — absolutely positioned overlay on the right edge */
+.obj-list-menu {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  padding: 4px 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-2);
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  line-height: 1;
+  z-index: 2;
+  flex-shrink: 0;
+}
+
+/* Fade overlay — visible on hover/open only, clipped to item via overflow:hidden */
+.obj-list-item::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 64px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  background: linear-gradient(to right, transparent, var(--surface-2) 60%);
+  z-index: 1;
+}
+.obj-list-item:hover::after,
+.obj-list-item:has(.obj-list-menu[data-state="open"])::after { opacity: 1; }
+.obj-list-item.selected::after {
+  background: linear-gradient(to right, transparent, var(--blue-bg) 60%);
+}
+.obj-list-item.selected:hover::after,
+.obj-list-item.selected:has(.obj-list-menu[data-state="open"])::after { opacity: 1; }
+
+.obj-list-item:hover .obj-list-menu,
+.obj-list-menu[data-state="open"] { opacity: 1; }
+.obj-list-menu:hover {
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--border-2);
+}
+
+/* ── Tooltip ──────────────────────────────────────────────────────────────── */
+.obj-tooltip {
+  background: var(--text);
+  color: #fff;
+  font-size: 12px;
+  padding: 5px 9px;
+  border-radius: 6px;
+  max-width: 220px;
+  line-height: 1.4;
+  z-index: 9999;
+}
+
+.obj-tooltip-arrow {
+  fill: var(--text);
+}
+
+/* ── Right pane ───────────────────────────────────────────────────────────── */
+.cat-right-pane {
+  flex: 1;
+  overflow: auto;
+  background: var(--bg);
+}
+
+.cat-right-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 48px;
+  color: var(--text-3);
+  font-size: 14px;
+  text-align: center;
+}
+.cat-right-cross-hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 48px;
+  color: var(--text-3);
+  font-size: 13px;
+  text-align: center;
+  font-style: italic;
+}
+.ds-desc { margin: 0 0 8px; }
+.ds-desc-ta { width: 100%; margin-bottom: 8px; }
+
+/* ── Data Model detail ────────────────────────────────────────────────────── */
+.dm-detail {
+  padding: 28px 32px;
+  min-height: 100%;
+  box-sizing: border-box;
+  background: var(--bg);
+}
+
+.dm-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 4px;
+}
+
+.dm-header-left { flex: 1; min-width: 0; }
+.dm-header-actions { display: flex; gap: 8px; flex-shrink: 0; align-items: center; }
+
+.dm-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text);
+  margin: 0 0 2px;
+  line-height: 1.2;
+}
+
+.dm-source-label {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.dm-name-input {
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text);
+  width: 100%;
+  padding: 0;
+  line-height: 1.2;
+  outline: none;
+  border-bottom: 2px solid var(--blue);
+}
+
+.dm-desc {
+  font-size: 13.5px;
+  color: var(--text-2);
+  line-height: 1.6;
+  margin: 10px 0 20px;
+}
+
+.dm-desc-ta {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  border: none;
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 13.5px;
+  color: var(--text-2);
+  line-height: 1.6;
+  padding: 10px 12px;
+  resize: vertical;
+  min-height: 64px;
+  margin: 10px 0 20px;
+  outline: none;
+}
+
+.dm-desc-ta:focus { border-color: var(--blue); }
+
+/* Fields section header */
+.dm-fields-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.dm-fields-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.dm-fields-count {
+  font-weight: 400;
+  color: var(--text-3);
+}
+
+.dm-field-search {
+  border: 1px solid var(--border-2);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 5px 9px;
+  font-size: 12.5px;
+  font: inherit;
+  width: 180px;
+}
+
+.dm-field-search::placeholder { color: var(--text-3); }
+.dm-field-search:focus { outline: none; border-color: var(--blue); }
+
+/* Fields table */
+.dm-fields-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  font-size: 13px;
+}
+
+.dm-th {
+  background: var(--surface-2);
+  padding: 8px 10px;
+  text-align: left;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-3);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.dm-th-check  { width: 36px; }
+.dm-th-field  { width: 160px; }
+.dm-th-display { width: 140px; }
+.dm-th-role   { width: 110px; }
+.dm-th-desc   { }
+.dm-th-opts   { width: 36px; }
+
+.dm-col-opts {
+  color: var(--text-3);
+  font-size: 14px;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.dm-col-opts:hover { background: var(--border); color: var(--text); }
+
+/* Group header rows */
+.dm-group-row td {
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.dm-group-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-3);
+}
+
+.dm-group-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--border);
+  border-radius: 10px;
+  padding: 1px 6px;
+  font-size: 10.5px;
+  color: var(--text-3);
+  margin-left: 6px;
+  font-weight: 600;
+}
+
+/* Field rows */
+.dm-field-row td {
+  border-bottom: 1px solid var(--border);
+}
+
+.dm-field-row:last-child td { border-bottom: none; }
+
+.dm-field-row.dm-row-hidden {
+  opacity: 0.4;
+}
+
+.dm-td {
+  padding: 7px 10px;
+  vertical-align: middle;
+}
+
+.dm-td-check { text-align: center; }
+
+.dm-td-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dm-field-name {
+  font-size: 13px;
+  font-family: 'SF Mono', 'Fira Code', ui-monospace, monospace;
+  color: var(--text);
+}
+
+.dm-auto-name { color: var(--text-3); font-size: 13px; }
+.dm-custom-name { color: var(--text); font-size: 13px; font-weight: 500; }
+
+.dm-desc-cell {
+  color: var(--text-2);
+  font-size: 12.5px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Role pills */
+.role-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 5px;
+  padding: 2px 7px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid;
+  white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.role-pill.role-dimension, .role-pill.role-id {
+  background: var(--blue-bg);
+  border-color: var(--blue-border);
+  color: var(--blue);
+}
+
+.role-pill.role-measure {
+  background: var(--green-bg);
+  border-color: var(--green-border);
+  color: var(--green);
+}
+
+/* Inline editable cell input */
+.dm-cell-input {
+  width: 100%;
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  padding: 0;
+  outline: none;
+}
+
+.dm-td:focus-within {
+  background: var(--blue-bg);
+  outline: 1px solid var(--blue-border);
+}
+
+.dm-role-trigger {
+  font-size: 12px;
+  padding: 3px 6px;
+  min-width: 90px;
+}
+
+/* Inline role select in edit mode */
+.dm-td-role .bu-trigger {
+  width: 100%;
+  font-size: 12px;
+  padding: 3px 7px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   DATASET CANVAS PANE
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.ds-canvas-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+/* Header */
+.ds-canvas-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 24px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.ds-canvas-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.ds-name-input {
+  font-size: 18px !important;
+}
+
+/* Edit mode banner */
+.ds-edit-banner {
+  background: var(--blue-bg);
+  border-bottom: 1px solid var(--blue-border);
+  padding: 7px 20px;
+  font-size: 12.5px;
+  color: var(--blue);
+  flex-shrink: 0;
+}
+
+/* Canvas body */
+.ds-canvas-body {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.ds-canvas-body .react-flow {
+  height: 100%;
+  width: 100%;
+}
+
+/* Ensure join node buttons (EdgeLabelRenderer) render above entity cards */
+.ds-canvas-body .react-flow__edge-labels {
+  z-index: 10;
+}
+
+/* Add model float button */
+.ds-add-model-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 13px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.1);
+  cursor: pointer;
+}
+
+.ds-add-model-btn:hover {
+  background: var(--blue);
+  color: #fff;
+  border-color: var(--blue);
+}
+
+/* Dataset preview panel — fits inside ds-canvas-pane flex column */
+.ds-prev-panel {
+  flex-shrink: 0;
+}
+
+/* Read-only badge on canvas */
+.ds-readonly-badge {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  pointer-events: none;
+}
+
+/* Empty state */
+.ds-canvas-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: var(--text-3);
+  font-size: 14px;
+  pointer-events: none;
+}
+
+.ds-canvas-empty .btn {
+  pointer-events: all;
+}
+
+/* Dataset entity card — simpler than full editor card */
+.ds-ecard {
+  min-width: 180px;
+  max-width: 220px;
+  overflow: visible;
+}
+
+/* Hide connection handles in read-only mode */
+/* Use visibility:hidden not display:none — RF needs handles in the DOM to measure edge endpoints */
+.ds-ecard-readonly .entity-handle { visibility: hidden !important; opacity: 0 !important; pointer-events: none !important; }
+
+/* Clickable field rows on dataset canvas */
+.ds-frow { cursor: pointer; }
+.ds-frow:hover  { background: var(--blue-bg); }
+.ds-frow-active { background: var(--blue-bg); }
+
+/* Field detail popover — floats to the RIGHT of the entity card */
+/* Dataset canvas field popover overlay layer */
+.ds-fp-layer {
+  width: 270px;
+}
+
+/* Arrow points left (toward the entity card) — same as default .canvas-popup-arrow */
+
+.ds-fp-head {
+  background: linear-gradient(180deg, rgba(0,0,0,0.025), transparent 90%);
+}
+
+.ds-fp-key {
+  font-size: 11.5px;
+  color: var(--text-3);
+  margin-top: 2px;
+}
+
+.ds-fp-pill-row {
+  padding: 0 0 8px;
+}
+
+.ds-fp-desc {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+
+.ds-fp-empty {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-3);
+  font-style: italic;
+}
+
+/* Legacy .ds-field-popover kept for any leftover references */
+.ds-field-popover {
+  position: absolute;
+  left: calc(100% + 14px);
+  width: 260px;
+}
+
+/* Badges reusable across popovers */
+.ds-field-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 999px;
+  letter-spacing: 0.01em;
+  flex-shrink: 0;
+}
+
+.ds-field-badge-id,
+.ds-field-badge-dimension { background: var(--blue-bg); color: var(--blue); border: 1px solid var(--blue-border); }
+.ds-field-badge-measure    { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
+.ds-field-badge-calc       { background: var(--amber-bg, #fffbeb); color: var(--amber, #b45309); border: 1px solid var(--amber-border, #fde68a); }
+.ds-field-badge-neutral    { background: var(--surface-2); color: var(--text-2); border: 1px solid var(--border); }
+
+.ds-ecard-remove {
+  opacity: 0;
+  transition: opacity 0.1s;
+  color: var(--text-3);
+  font-size: 11px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  line-height: 1;
+}
+
+.ds-ecard:hover .ds-ecard-remove { opacity: 1; }
+.ds-ecard-remove:hover { background: var(--border); color: var(--text); }
+
+/* Hidden fields footer */
+.ds-hidden-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+  border-radius: 0 0 var(--radius) var(--radius);
+  position: relative;
+  min-height: 28px;
+}
+
+.ds-hidden-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--text-2);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: default;
+  line-height: 1;
+}
+
+.ds-hidden-label {
+  text-decoration-line: underline;
+  text-decoration-style: dotted;
+  text-decoration-color: var(--text-3);
+  text-underline-offset: 2px;
+  cursor: default;
+}
+
+/* Popover listing hidden field names */
+.ds-hidden-popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  padding: 7px 10px;
+  min-width: 140px;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.ds-hidden-popover-title {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 5px;
+}
+
+.ds-hidden-popover-field {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-2);
+  padding: 2px 0;
+}
+
+.ds-hidden-popover-field .ftype {
+  font-size: 10px;
+  padding: 1px 3px;
+}
+
+/* Navigate to model icon button — visible on footer hover */
+.ds-hidden-nav-btn {
+  opacity: 0;
+  transition: opacity 0.12s;
+  padding: 3px 4px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.ds-hidden-footer:hover .ds-hidden-nav-btn { opacity: 1; }
+.ds-hidden-nav-btn:hover { color: var(--blue); border-color: var(--blue); background: var(--blue-bg); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ADD DATA MODELS MODAL
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.add-model-modal {
+  width: 480px;
+  max-width: 96vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.add-model-search-wrap {
+  padding: 12px 16px 8px;
+  flex-shrink: 0;
+}
+
+.add-model-search {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border-2);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 8px 11px;
+  font: inherit;
+  font-size: 13.5px;
+  outline: none;
+}
+
+.add-model-search:focus { border-color: var(--blue); }
+
+.add-model-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 8px;
+  min-height: 0;
+}
+
+.add-model-empty {
+  padding: 20px 12px;
+  color: var(--text-3);
+  font-size: 13px;
+  text-align: center;
+}
+
+.add-model-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.add-model-row:hover { background: var(--surface-2); }
+
+.add-model-check {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--blue);
+}
+
+.add-model-row-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.add-model-row-name {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.add-model-row-source {
+  font-size: 11.5px;
+}
+
+.add-model-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+  background: var(--surface-2);
 }

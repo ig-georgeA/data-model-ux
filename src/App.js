@@ -5,6 +5,7 @@ import { Select } from './components/ui/select';
 import { Switch } from './components/ui/switch';
 import { Tabs } from './components/ui/tabs';
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
+import * as TooltipPrimitive from '@radix-ui/react-tooltip';
 import {
   ReactFlow, Background, Handle, Position,
   getBezierPath, EdgeLabelRenderer,
@@ -13,19 +14,128 @@ import {
 import Dagre from '@dagrejs/dagre';
 import './App.css';
 
-const MODELS = {
+// ── Source brand colors ──────────────────────────────────────────────────────
+const SOURCE_BRAND_COLORS = {
+  'sales-db':        '#336791',
+  'product-db':      '#e48e00',
+  'hubspot':         '#ff5c35',
+  'salesforce':      '#00a1e0',
+  'snowflake':       '#29b5e8',
+  'google-bigquery': '#4285f4',
+  'google-analytics':'#e37400',
+  'amazon-redshift': '#8c4fff',
+  'databricks':      '#ff3621',
+};
+const SOURCE_BRAND_COLOR_DEFAULT = '#6f675d';
+
+function sourceBrandColor(sourceId) {
+  return SOURCE_BRAND_COLORS[sourceId] || SOURCE_BRAND_COLOR_DEFAULT;
+}
+
+function autoDisplayName(fieldKey) {
+  return fieldKey
+    .split('_')
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
+// ── Data Models (single-entity semantic definitions, no joins) ────────────────
+const DATA_MODELS_INITIAL = [
+  {
+    id: 'orders', name: 'Orders', sourceId: 'sales-db', sourceName: 'Sales DB',
+    description: 'Each record represents an individual order line item placed by a customer. Use to analyze revenue, volume, and order-level trends over time.',
+    grain: 'One row per order line item',
+    usedInDatasetIds: ['sales-overview', 'revenue-summary'],
+    fields: [
+      { key: 'order_id',    label: 'order_id',    type: '#',  isKey: true, role: 'ID',        visible: true,  semanticDesc: 'Unique identifier per order line item. Use COUNT(DISTINCT order_id) to measure order volume. Never aggregate directly.' },
+      { key: 'customer_id', label: 'customer_id', type: '#',  role: 'DIMENSION', visible: true,  semanticDesc: 'Foreign key to the customers table. Null values indicate guest or unattributed orders.' },
+      { key: 'product_id',  label: 'product_id',  type: '#',  role: 'DIMENSION', visible: true,  semanticDesc: 'Foreign key to the products table. Orders without a matching product SKU are excluded via INNER JOIN.' },
+      { key: 'order_date',  label: 'order_date',  type: 'dt', role: 'DIMENSION', visible: true,  semanticDesc: 'Date the order was placed (UTC). Primary time axis for this model.' },
+      { key: 'amount',      label: 'amount',      type: '$',  role: 'MEASURE',   visible: true,  agg: 'SUM', semanticDesc: 'Gross order revenue in USD before discounts or cost deductions. Aggregate with SUM.' },
+      { key: 'revenue_net', label: 'revenue_net', type: 'fx', role: 'MEASURE',   visible: true,  agg: 'SUM', calc: true, semanticDesc: 'Net revenue after deducting customer discounts and unit cost. Preferred metric for profitability.' },
+    ],
+  },
+  {
+    id: 'customers', name: 'Customers', sourceId: 'sales-db', sourceName: 'Sales DB',
+    description: 'Each record represents a unique, deduplicated customer identity. Use to segment, filter, and profile buyers across orders.',
+    grain: 'One row per customer',
+    usedInDatasetIds: ['sales-overview', 'customer-ltv'],
+    fields: [
+      { key: 'customer_id', label: 'customer_id', type: '#',  isKey: true, role: 'ID',        visible: true,  semanticDesc: 'Primary key for the customers table. Use to JOIN with orders.customer_id.' },
+      { key: 'full_name',   label: 'full_name',   type: 'Aa', role: 'DIMENSION', visible: true,  semanticDesc: "Customer's display name. Use for labeling. Avoid joining on this field; use customer_id." },
+      { key: 'region',      label: 'region',      type: 'Aa', role: 'DIMENSION', visible: true,  semanticDesc: 'Geographic sales region (e.g. APAC, LATAM, EMEA, NA).' },
+      { key: 'segment',     label: 'segment',     type: 'Aa', role: 'DIMENSION', visible: true,  semanticDesc: 'Customer market tier (e.g. Enterprise, Mid-Market, SMB). Key dimension for cohort analysis.' },
+    ],
+  },
+  {
+    id: 'products', name: 'Products', sourceId: 'product-db', sourceName: 'Product DB',
+    description: 'Each record represents a product SKU in the catalog. Use to enrich order data with product attributes, category, and cost.',
+    grain: 'One row per product SKU',
+    usedInDatasetIds: ['sales-overview', 'revenue-summary'],
+    fields: [
+      { key: 'product_id',   label: 'product_id',   type: '#',  isKey: true, role: 'ID',        visible: true,  semanticDesc: 'Primary key for the product catalog. Use to JOIN with orders.product_id.' },
+      { key: 'product_name', label: 'product_name', type: 'Aa', role: 'DIMENSION', visible: true,  semanticDesc: 'Human-readable product name. For grouping across product lines, prefer category.' },
+      { key: 'category',     label: 'category',     type: 'Aa', role: 'DIMENSION', visible: true,  semanticDesc: 'Product line grouping (e.g. Licenses, Services, Hardware).' },
+      { key: 'unit_cost',    label: 'unit_cost',    type: '$',  role: 'MEASURE',   visible: false, agg: 'AVG', semanticDesc: 'Cost to the business per product unit in USD.' },
+    ],
+  },
+  {
+    id: 'returns', name: 'Returns', sourceId: 'sales-db', sourceName: 'Sales DB',
+    description: 'Each record represents a product return initiated by a customer. Use to calculate return rates and identify return drivers.',
+    grain: 'One row per return event',
+    usedInDatasetIds: [],
+    fields: [
+      { key: 'return_id',   label: 'return_id',   type: '#',  isKey: true, role: 'ID',        visible: true,  semanticDesc: 'Unique identifier per return record.' },
+      { key: 'order_id',    label: 'order_id',    type: '#',  role: 'DIMENSION', visible: true,  semanticDesc: 'Links the return to its originating order.' },
+      { key: 'customer_id', label: 'customer_id', type: '#',  role: 'DIMENSION', visible: true,  semanticDesc: 'Links the return to the customer who initiated it.' },
+      { key: 'return_date', label: 'return_date', type: 'dt', role: 'DIMENSION', visible: true,  semanticDesc: 'Date the return was initiated.' },
+      { key: 'reason',      label: 'reason',      type: 'Aa', role: 'DIMENSION', visible: true,  semanticDesc: 'Customer-stated reason for the return.' },
+    ],
+  },
+  {
+    id: 'contacts', name: 'Contacts', sourceId: 'hubspot', sourceName: 'HubSpot',
+    description: 'Each record represents a marketing contact in HubSpot. Use to connect marketing activity to pipeline and revenue outcomes.',
+    grain: 'One row per HubSpot contact',
+    usedInDatasetIds: ['marketing-attribution'],
+    fields: [
+      { key: 'contact_id',  label: 'contact_id',  type: '#',  isKey: true, role: 'ID',        visible: true,  semanticDesc: 'Primary key for the HubSpot contacts table.' },
+      { key: 'email',       label: 'email',        type: 'Aa', role: 'DIMENSION', visible: true,  semanticDesc: 'Contact email address. Use as the join key to match with order or deal records.' },
+      { key: 'lifecycle',   label: 'lifecycle',    type: 'Aa', role: 'DIMENSION', visible: true,  semanticDesc: 'HubSpot lifecycle stage (e.g. Lead, MQL, SQL, Customer).' },
+      { key: 'source',      label: 'source',       type: 'Aa', role: 'DIMENSION', visible: true,  semanticDesc: 'Original acquisition source (e.g. Organic, Paid, Referral).' },
+      { key: 'created_at',  label: 'created_at',   type: 'dt', role: 'DIMENSION', visible: false, semanticDesc: 'Timestamp when the contact was created in HubSpot.' },
+    ],
+  },
+];
+
+// ── Datasets (join & execution layer — multiple Data Models combined) ─────────
+const DATASETS_INITIAL = {
   draft: [
-    { id: 'customer-ltv', name: 'Customer LTV', desc: 'Lifetime value across orders and subscription events', entities: 2, joins: 1, uses: 0, stage: 'draft', progress: 0 },
-    { id: 'marketing-attribution', name: 'Marketing attribution', desc: 'Campaign spend linked to converted deals via UTM source', entities: 3, joins: 2, uses: 4, stage: 'draft', progress: 1 },
+    { id: 'customer-ltv', name: 'Customer LTV', desc: 'Lifetime value across orders and subscription events', entities: 2, joins: 1, uses: 0, stage: 'draft', progress: 0, modelIds: ['orders', 'customers'] },
+    { id: 'marketing-attribution', name: 'Marketing attribution', desc: 'Campaign spend linked to converted deals via UTM source', entities: 3, joins: 2, uses: 4, stage: 'draft', progress: 1, modelIds: ['contacts'] },
   ],
   dev: [
-    { id: 'sales-overview', name: 'Sales overview', desc: 'Orders joined with customers and products for sales exploration', entities: 3, joins: 2, uses: 12, stage: 'dev', progress: 6 },
-    { id: 'support-tickets', name: 'Support tickets', desc: 'Zendesk tickets linked to accounts for CSAT analysis', entities: 2, joins: 1, uses: 23, stage: 'dev', progress: 11 },
+    { id: 'sales-overview', name: 'Sales overview', desc: 'Orders joined with customers and products for sales exploration', entities: 3, joins: 2, uses: 12, stage: 'dev', progress: 6, modelIds: ['orders', 'customers', 'products'] },
+    { id: 'support-tickets', name: 'Support tickets', desc: 'Zendesk tickets linked to accounts for CSAT analysis', entities: 2, joins: 1, uses: 23, stage: 'dev', progress: 11, modelIds: [] },
   ],
   production: [
-    { id: 'revenue-summary', name: 'Revenue summary', desc: 'Aggregated revenue model used across all executive dashboards', entities: 4, joins: 3, uses: 847, stage: 'production', progress: 100 },
-    { id: 'headcount-roles', name: 'Headcount & roles', desc: 'HRIS data combined with org chart hierarchy for people analytics', entities: 3, joins: 2, uses: 234, stage: 'production', progress: 28 },
+    { id: 'revenue-summary', name: 'Revenue summary', desc: 'Aggregated revenue model used across all executive dashboards', entities: 4, joins: 3, uses: 847, stage: 'production', progress: 100, modelIds: ['orders', 'products'] },
+    { id: 'headcount-roles', name: 'Headcount & roles', desc: 'HRIS data combined with org chart hierarchy for people analytics', entities: 3, joins: 2, uses: 234, stage: 'production', progress: 28, modelIds: [] },
   ],
+};
+
+// ── Metrics ──────────────────────────────────────────────────────────────────
+const METRICS_INITIAL = [
+  { id: 'total-revenue',  name: 'Total Revenue',         description: 'Sum of gross order revenue across all orders in the dataset.', datasetId: 'sales-overview',  expression: 'SUM(amount)',              aggregation: 'SUM', isGlobal: false },
+  { id: 'net-revenue',    name: 'Net Revenue',           description: 'Sum of revenue after deducting discounts and unit cost.',      datasetId: 'sales-overview',  expression: 'SUM(revenue_net)',         aggregation: 'SUM', isGlobal: false },
+  { id: 'aov',            name: 'Average Order Value',   description: 'Average gross revenue per order. Divide total revenue by distinct order count.', datasetId: 'sales-overview', expression: 'SUM(amount) / COUNT(DISTINCT order_id)', aggregation: 'DERIVED', isGlobal: false },
+  { id: 'return-rate',    name: 'Return Rate',           description: 'Percentage of orders that resulted in a return.',             datasetId: 'revenue-summary', expression: 'COUNT(return_id) / COUNT(DISTINCT order_id)', aggregation: 'DERIVED', isGlobal: false },
+];
+
+// Legacy alias — keeps the existing editor/inspect view working unchanged
+const MODELS = {
+  draft:      DATASETS_INITIAL.draft,
+  dev:        DATASETS_INITIAL.dev,
+  production: DATASETS_INITIAL.production,
 };
 
 const INITIAL_ENTITIES = [
@@ -84,6 +194,8 @@ const PREVIEW_ROWS = [
 const JOIN_MAP = { INNER: 'INNER JOIN', LEFT: 'LEFT JOIN', RIGHT: 'RIGHT JOIN', FULL: 'FULL OUTER JOIN', LEFT_EXCL: 'LEFT JOIN', RIGHT_EXCL: 'RIGHT JOIN' };
 
 const ActiveFieldContext = createContext(null);
+// Shared context for dataset canvas field popovers — one open at a time.
+const DsActiveFieldContext = createContext(null);
 
 const DBT_TYPE_MAP = { '#': 'integer', '$': 'numeric', 'Aa': 'varchar', 'dt': 'timestamp', 'fx': 'numeric' };
 const DBT_AGG_MAP = { SUM: 'sum', AVG: 'average', COUNT: 'count', MIN: 'min', MAX: 'max' };
@@ -276,15 +388,6 @@ const CAT_COLORS = {
 const ITEM_CATEGORY_MAP = Object.fromEntries(
   CONNECTOR_CATEGORIES.flatMap((cat) => cat.items.map((item) => [item.id, cat.category]))
 );
-
-const CATEGORY_LABELS = {
-  'Files': 'Files',
-  'Databases': 'Databases',
-  'Marketing, Sales and CRMs': 'Marketing & Sales',
-  'Big Data Storages': 'Big Data',
-  'From the web': 'Web',
-  'Social Media': 'Social Media',
-};
 
 function connectorAbbr(name) {
   const words = name.split(' ');
@@ -814,22 +917,23 @@ function JoinEdge({
     isActive, onSelect, joinType, joinHighlight,
     fromEntity, toEntity, fromChoices, toChoices, from, to, desc,
     onUpdateJoin, hoveredJoinType, setHoveredJoinType, onClose,
+    isReadOnly, onEdit,
   } = data;
   const [,, zoom] = useStore((s) => s.transform);
 
   return (
     <>
-      <path id={id} className="react-flow__edge-path join-edge-path" d={edgePath} />
+      <path id={id} className={`react-flow__edge-path join-edge-path${isReadOnly ? ' join-edge-ro' : ''}`} d={edgePath} />
       <EdgeLabelRenderer>
         <button
-          className={`jnode nodrag nopan ${isActive ? 'active' : ''}`}
+          className={`jnode nodrag nopan${isActive ? ' active' : ''}${isReadOnly ? ' jnode-ro' : ''}`}
           style={{
             position: 'absolute',
             transform: `translate(${labelX}px,${labelY}px) scale(${1 / zoom}) translate(-50%,-50%)`,
             pointerEvents: 'all',
           }}
           onClick={onSelect}
-          aria-label={`Edit join between ${fromEntity} and ${toEntity}`}
+          aria-label={`${isReadOnly ? 'View' : 'Edit'} join between ${fromEntity} and ${toEntity}`}
         >
           <JoinTypeGlyph className="jnode-glyph" highlight={joinHighlight || 'intersection'} />
         </button>
@@ -850,56 +954,89 @@ function JoinEdge({
               </div>
               <button className="plain-btn canvas-popup-close" onClick={onClose}>×</button>
             </header>
-            <div className="canvas-popup-body">
-              <section className="sp-section">
-                <p className="sp-lbl">Join type</p>
-                <div className="join-type-grid" role="radiogroup" aria-label="Join type selector">
-                  {JOIN_TYPES.map((item) => {
-                    const selected = joinType === item.value;
-                    return (
-                      <button
-                        key={item.value}
-                        type="button"
-                        className={`join-type-card ${selected ? 'selected' : ''}`}
-                        role="radio"
-                        aria-checked={selected}
-                        onClick={() => onUpdateJoin(id, 'type', item.value)}
-                        onMouseEnter={() => setHoveredJoinType(item.value)}
-                        onMouseLeave={() => setHoveredJoinType(null)}
-                        title={item.implication}
-                      >
-                        <JoinTypeGlyph highlight={item.highlight} />
-                        <span className="join-type-name">{item.label}</span>
-                      </button>
-                    );
-                  })}
+            {isReadOnly ? (
+              <div className="canvas-popup-body">
+                <section className="sp-section join-ro-section">
+                  <div className="join-ro-type-row">
+                    <JoinTypeGlyph highlight={joinHighlight || 'intersection'} />
+                    <div>
+                      <div className="join-ro-type-name">{JOIN_TYPES.find((t) => t.value === joinType)?.label ?? joinType}</div>
+                      <div className="join-ro-type-sql">{JOIN_MAP[joinType]}</div>
+                    </div>
+                  </div>
+                  <p className="join-ro-implication">{JOIN_TYPES.find((t) => t.value === joinType)?.implication}</p>
+                </section>
+                <section className="sp-section join-ro-section">
+                  <p className="sp-lbl">Key mapping</p>
+                  <div className="join-ro-map">
+                    <code className="join-ro-key">{from}</code>
+                    <span className="join-arrow">→</span>
+                    <code className="join-ro-key">{to}</code>
+                  </div>
+                </section>
+                {desc && (
+                  <section className="sp-section join-ro-section">
+                    <p className="sp-lbl">Description</p>
+                    <p className="join-ro-desc">{desc}</p>
+                  </section>
+                )}
+                <div className="join-ro-edit-notice">
+                  <span>Read only</span>
+                  <button className="btn btn-sm" onClick={() => { onClose(); onEdit(); }}>Edit dataset</button>
                 </div>
-                {(() => {
-                  const meta = JOIN_TYPES.find((i) => i.value === (hoveredJoinType || joinType));
-                  return meta ? (
-                    <div className="join-type-hint"><strong>{meta.label}</strong><p>{meta.implication}</p></div>
-                  ) : null;
-                })()}
-              </section>
-              <section className="sp-section">
-                <p className="sp-lbl">Key mapping</p>
-                <div className="join-map-row">
-                  <Select.Root value={from} onValueChange={(v) => onUpdateJoin(id, 'from', v)} items={fromChoices}>
-                    <Select.Trigger className="bu-trigger"><Select.Value /><Select.Icon className="bu-icon">▾</Select.Icon></Select.Trigger>
-                    <Select.Portal><Select.Positioner><Select.Popup className="bu-popup"><Select.List>{fromChoices.map((c) => (<Select.Item key={c} value={c} className="bu-item"><Select.ItemText>{c}</Select.ItemText></Select.Item>))}</Select.List></Select.Popup></Select.Positioner></Select.Portal>
-                  </Select.Root>
-                  <span className="join-arrow">→</span>
-                  <Select.Root value={to} onValueChange={(v) => onUpdateJoin(id, 'to', v)} items={toChoices}>
-                    <Select.Trigger className="bu-trigger"><Select.Value /><Select.Icon className="bu-icon">▾</Select.Icon></Select.Trigger>
-                    <Select.Portal><Select.Positioner><Select.Popup className="bu-popup"><Select.List>{toChoices.map((c) => (<Select.Item key={c} value={c} className="bu-item"><Select.ItemText>{c}</Select.ItemText></Select.Item>))}</Select.List></Select.Popup></Select.Positioner></Select.Portal>
-                  </Select.Root>
-                </div>
-              </section>
-              <section className="sp-section">
-                <p className="sp-lbl">Description</p>
-                <textarea className="fi-ta" value={desc} onChange={(e) => onUpdateJoin(id, 'desc', e.target.value)} />
-              </section>
-            </div>
+              </div>
+            ) : (
+              <div className="canvas-popup-body">
+                <section className="sp-section">
+                  <p className="sp-lbl">Join type</p>
+                  <div className="join-type-grid" role="radiogroup" aria-label="Join type selector">
+                    {JOIN_TYPES.map((item) => {
+                      const selected = joinType === item.value;
+                      return (
+                        <button
+                          key={item.value}
+                          type="button"
+                          className={`join-type-card ${selected ? 'selected' : ''}`}
+                          role="radio"
+                          aria-checked={selected}
+                          onClick={() => onUpdateJoin(id, 'type', item.value)}
+                          onMouseEnter={() => setHoveredJoinType(item.value)}
+                          onMouseLeave={() => setHoveredJoinType(null)}
+                          title={item.implication}
+                        >
+                          <JoinTypeGlyph highlight={item.highlight} />
+                          <span className="join-type-name">{item.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {(() => {
+                    const meta = JOIN_TYPES.find((i) => i.value === (hoveredJoinType || joinType));
+                    return meta ? (
+                      <div className="join-type-hint"><strong>{meta.label}</strong><p>{meta.implication}</p></div>
+                    ) : null;
+                  })()}
+                </section>
+                <section className="sp-section">
+                  <p className="sp-lbl">Key mapping</p>
+                  <div className="join-map-row">
+                    <Select.Root value={from} onValueChange={(v) => onUpdateJoin(id, 'from', v)} items={fromChoices}>
+                      <Select.Trigger className="bu-trigger"><Select.Value /><Select.Icon className="bu-icon">▾</Select.Icon></Select.Trigger>
+                      <Select.Portal><Select.Positioner><Select.Popup className="bu-popup"><Select.List>{fromChoices.map((c) => (<Select.Item key={c} value={c} className="bu-item"><Select.ItemText>{c}</Select.ItemText></Select.Item>))}</Select.List></Select.Popup></Select.Positioner></Select.Portal>
+                    </Select.Root>
+                    <span className="join-arrow">→</span>
+                    <Select.Root value={to} onValueChange={(v) => onUpdateJoin(id, 'to', v)} items={toChoices}>
+                      <Select.Trigger className="bu-trigger"><Select.Value /><Select.Icon className="bu-icon">▾</Select.Icon></Select.Trigger>
+                      <Select.Portal><Select.Positioner><Select.Popup className="bu-popup"><Select.List>{toChoices.map((c) => (<Select.Item key={c} value={c} className="bu-item"><Select.ItemText>{c}</Select.ItemText></Select.Item>))}</Select.List></Select.Popup></Select.Positioner></Select.Portal>
+                    </Select.Root>
+                  </div>
+                </section>
+                <section className="sp-section">
+                  <p className="sp-lbl">Description</p>
+                  <textarea className="fi-ta" value={desc} onChange={(e) => onUpdateJoin(id, 'desc', e.target.value)} />
+                </section>
+              </div>
+            )}
           </div>
         )}
       </EdgeLabelRenderer>
@@ -1128,9 +1265,1095 @@ function EditorCanvas({
   );
 }
 
+// ── Catalog left pane ─────────────────────────────────────────────────────────
+// ── Dataset Canvas right pane ─────────────────────────────────────────────
+// Read-only ReactFlow canvas scoped to a single dataset's modelIds.
+// Edit mode unlocks drag, connect, and add-model interactions.
+
+// Build a joins map from inferred key-field matches between entity pairs.
+function initJoinsFromEntities(entities) {
+  const joins = {};
+  for (let i = 0; i < entities.length; i++) {
+    for (let j = 0; j < entities.length; j++) {
+      if (i === j) continue;
+      const a = entities[i];
+      const b = entities[j];
+      const bPrimaryKeys = b.allFields.filter((f) => f.isKey).map((f) => f.key);
+      const matchingField = a.allFields.find((f) => bPrimaryKeys.includes(f.key) && !f.isKey);
+      const reverseExists = Object.values(joins).some(
+        (jn) => jn.fromEntity === b.id && jn.toEntity === a.id
+      );
+      if (matchingField && !reverseExists) {
+        const id = `join-${a.id}-${b.id}`;
+        joins[id] = {
+          id,
+          fromEntity: a.label,  // human-readable label for JoinEdge popup
+          toEntity: b.label,
+          fromEntityId: a.id,   // actual RF source/target ids
+          toEntityId: b.id,
+          type: 'LEFT',
+          from: matchingField.key,
+          to: matchingField.key,
+          desc: '',
+          fromChoices: a.allFields.map((f) => f.key),
+          toChoices: b.allFields.map((f) => f.key),
+        };
+      }
+    }
+  }
+  return joins;
+}
+
+// ── Dataset canvas field popover overlay ──────────────────────────────────
+// Rendered as a sibling to ReactFlow in ds-canvas-body so it escapes
+// each node's stacking context and can sit above all cards.
+function DsFieldPopoverLayer() {
+  const ctx = useContext(DsActiveFieldContext);
+  const [tx, ty, zoom] = useStore((s) => s.transform);
+  if (!ctx || !ctx.activeDsField) return null;
+
+  const { activeDsField, setActiveDsField, activeEntities, positions, onNavigateToModel } = ctx;
+  const entity = activeEntities.find((e) => e.id === activeDsField.nodeId);
+  const entityPos = positions[activeDsField.nodeId];
+  if (!entity || !entityPos) return null;
+
+  const allFields = entity.allFields || entity.fields;
+  const fieldMeta = allFields.find((f) => f.key === activeDsField.fieldKey);
+  if (!fieldMeta) return null;
+
+  const visFields = entity.fields;
+  const fieldIdx = visFields.findIndex((f) => f.key === activeDsField.fieldKey);
+
+  // Convert flow coords → screen-space pixels via RF viewport transform
+  const flowX = entityPos.x + ENTITY_CARD_WIDTH + 18;
+  const flowY = entityPos.y + ENTITY_HEADER_HEIGHT + Math.max(fieldIdx, 0) * ENTITY_ROW_HEIGHT + ENTITY_ROW_HEIGHT / 2;
+  const left = flowX * zoom + tx;
+  const top  = flowY * zoom + ty;
+
+  const displayName = fieldMeta.label || fieldMeta.key;
+  const fieldKey    = fieldMeta.key;
+  const role        = fieldMeta.role;
+  const desc        = fieldMeta.semanticDesc;
+
+  return (
+    <div
+      className="canvas-popup ds-fp-layer nodrag nopan"
+      style={{ position: 'absolute', left, top, transform: 'translateY(-50%)', pointerEvents: 'all', zIndex: 200 }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <span className="canvas-popup-arrow" />
+      <header className="canvas-popup-head ds-fp-head">
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="detail-title">{displayName}</div>
+          {displayName !== fieldKey && (
+            <div className="detail-sub ds-fp-key">{fieldKey}</div>
+          )}
+        </div>
+        <button className="plain-btn canvas-popup-close" onClick={() => setActiveDsField(null)}>×</button>
+      </header>
+      <div className="canvas-popup-body">
+        {role && (
+          <div className="ds-fp-pill-row">
+            <span className={`ds-field-badge ds-field-badge-${role.toLowerCase()}`}>
+              {ROLE_LABEL[role] ?? role}
+            </span>
+          </div>
+        )}
+        {desc && (
+          <section className="sp-section">
+            <p className="sp-lbl">Description</p>
+            <p className="ds-fp-desc">{desc}</p>
+          </section>
+        )}
+        {!desc && !role && (
+          <p className="ds-fp-empty">No description added.</p>
+        )}
+      </div>
+      {onNavigateToModel && (
+        <div className="join-ro-edit-notice">
+          <span />
+          <button className="btn btn-sm" onClick={() => onNavigateToModel(activeDsField.nodeId)}>
+            Edit in Model
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ marginLeft: 5, flexShrink: 0 }} aria-hidden="true">
+              <path d="M5 12h14M12 5l7 7-7 7"/>
+            </svg>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DatasetCanvasPaneInner({
+  dataset, dataModels, isEditing, editDraft, setEditDraft,
+  onEdit, onCancel, onSave, onOpenAddModel, onNavigateToModel,
+}) {
+  const { fitView } = useReactFlow();
+
+  // Active field popover state — shared across all nodes (one at a time)
+  const [activeDsField, setActiveDsField] = useState(null); // { nodeId, fieldKey } | null
+
+  // Build entity list from modelIds
+  const getEntities = useCallback((draft) => {
+    const ids = draft?.modelIds ?? dataset.modelIds ?? [];
+    return ids.map((mid) => {
+      const dm = dataModels.find((m) => m.id === mid);
+      if (!dm) return null;
+      const visFields = dm.fields.filter((f) => f.visible !== false);
+      return {
+        id: dm.id,
+        label: dm.name,
+        source: dm.sourceName,
+        sourceId: dm.sourceId,
+        allFields: dm.fields,
+        fields: visFields,
+        hiddenCount: dm.fields.length - visFields.length,
+      };
+    }).filter(Boolean);
+  }, [dataset.modelIds, dataModels]);
+
+  const activeEntities = isEditing ? getEntities(editDraft) : getEntities(null);
+
+  // Join state — inferred from entity key-field matches; type/keys are editable
+  const [joins, setJoins] = useState(() => initJoinsFromEntities(activeEntities));
+  const [activeJoin, setActiveJoin] = useState(null);
+  const [hoveredJoinType, setHoveredJoinType] = useState(null);
+
+  const updateJoin = useCallback((joinId, key, value) => {
+    setJoins((prev) => ({ ...prev, [joinId]: { ...prev[joinId], [key]: value } }));
+  }, []);
+
+  // JoinEdge-compatible edges built from joins state
+  const rfEdges = useMemo(() =>
+    Object.values(joins).map((j) => ({
+      id: j.id,
+      type: 'join',
+      source: j.fromEntityId,
+      target: j.toEntityId,
+      data: {
+        ...j,
+        joinType: j.type,
+        joinHighlight: JOIN_TYPES.find((t) => t.value === j.type)?.highlight,
+        isActive: activeJoin === j.id,
+        isReadOnly: !isEditing,
+        onEdit,
+        onSelect: () => setActiveJoin((prev) => prev === j.id ? null : j.id),
+        onUpdateJoin: updateJoin,
+        hoveredJoinType,
+        setHoveredJoinType,
+        onClose: () => setActiveJoin(null),
+      },
+    })),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [joins, activeJoin, hoveredJoinType]);
+
+  // Positions via Dagre — ranks nodes by join graph
+  const computePositions = useCallback((entities, joinMap) => {
+    if (entities.length === 0) return {};
+    const g = new Dagre.graphlib.Graph();
+    g.setGraph({ rankdir: 'LR', ranksep: 80, nodesep: 40 });
+    g.setDefaultEdgeLabel(() => ({}));
+    entities.forEach((e) => {
+      const h = ENTITY_HEADER_HEIGHT + e.fields.length * ENTITY_ROW_HEIGHT + ENTITY_FOOTER_HEIGHT;
+      g.setNode(e.id, { width: ENTITY_CARD_WIDTH, height: h });
+    });
+    Object.values(joinMap).forEach((j) => {
+      if (g.hasNode(j.fromEntityId) && g.hasNode(j.toEntityId)) {
+        g.setEdge(j.fromEntityId, j.toEntityId);
+      }
+    });
+    Dagre.layout(g);
+    const pos = {};
+    entities.forEach((e) => {
+      const node = g.node(e.id);
+      if (node) pos[e.id] = { x: node.x - ENTITY_CARD_WIDTH / 2, y: node.y };
+    });
+    return pos;
+  }, []);
+
+  const [positions, setPositions] = useState(() => computePositions(activeEntities, joins));
+
+  // When entity count changes: re-merge joins (preserve edited types), recompute layout
+  useEffect(() => {
+    const fresh = initJoinsFromEntities(activeEntities);
+    setJoins((prev) => {
+      const merged = {};
+      Object.values(fresh).forEach((j) => {
+        merged[j.id] = prev[j.id]
+          ? { ...j, type: prev[j.id].type, from: prev[j.id].from, to: prev[j.id].to, desc: prev[j.id].desc }
+          : j;
+      });
+      return merged;
+    });
+    const newPos = computePositions(activeEntities, fresh);
+    setPositions(newPos);
+    setTimeout(() => fitView({ padding: 0.18, duration: 300, maxZoom: 1 }), 80);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeEntities.length]);
+
+  const buildNodes = useCallback(() =>
+    activeEntities.map((e) => ({
+      id: e.id,
+      type: 'dsEntity',
+      position: positions[e.id] ?? { x: 100, y: 100 },
+      dragHandle: '.ec-hd',
+      data: {
+        ...e,
+        isEditing,
+        hiddenCount: e.hiddenCount,
+        onViewInModel: () => onNavigateToModel(e.id),
+        onRemove: isEditing ? () => {
+          setEditDraft((prev) => ({ ...prev, modelIds: (prev.modelIds ?? []).filter((id) => id !== e.id) }));
+        } : null,
+      },
+    })),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [activeEntities, positions, isEditing]);
+
+  const [rfNodes, setRfNodes, onNodesChange] = useNodesState(() => buildNodes());
+
+  useEffect(() => {
+    setRfNodes(buildNodes());
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeEntities.length, isEditing, positions]);
+
+  const onNodeDragStop = useCallback((_, node) => {
+    if (!isEditing) return;
+    setPositions((prev) => ({ ...prev, [node.id]: node.position }));
+  }, [isEditing]);
+
+  const onInit = useCallback((instance) => {
+    instance.fitView({ padding: 0.18, duration: 0, maxZoom: 1 });
+  }, []);
+
+  const stageBadgeClass = {
+    draft: 'badge-draft',
+    dev: 'badge-dev',
+    production: 'badge-prod',
+  }[dataset.stage] || 'badge-draft';
+
+  return (
+    <div className="ds-canvas-pane">
+      {/* Header */}
+      <div className="ds-canvas-header">
+        <div className="ds-canvas-header-left">
+          {isEditing ? (
+            <input
+              className="dm-name-input ds-name-input"
+              value={editDraft.name}
+              onChange={(e) => setEditDraft((p) => ({ ...p, name: e.target.value }))}
+              autoFocus
+            />
+          ) : (
+            <h2 className="dm-title">{dataset.name}</h2>
+          )}
+          <span className={`badge ${stageBadgeClass}`}>{dataset.stage}</span>
+        </div>
+        <div className="dm-header-actions">
+          {isEditing ? (
+            <>
+              <button className="btn" onClick={onCancel}>Cancel</button>
+              <button className="btn btn-primary" onClick={() => onSave(editDraft)}>Save</button>
+            </>
+          ) : (
+            <button className="btn" onClick={onEdit}>Edit</button>
+          )}
+        </div>
+      </div>
+
+      {/* Description */}
+      {isEditing ? (
+        <textarea
+          className="dm-desc-ta ds-desc-ta"
+          value={editDraft.desc ?? ''}
+          onChange={(e) => setEditDraft((p) => ({ ...p, desc: e.target.value }))}
+          placeholder="Describe this dataset for AI and collaborators…"
+        />
+      ) : (
+        dataset.desc && <p className="dm-desc ds-desc">{dataset.desc}</p>
+      )}
+
+      {/* Unsaved-change banner (edit mode notice) */}
+      {isEditing && (
+        <div className="ds-edit-banner">
+          <span>Edit mode — changes are not saved until you click Save.</span>
+        </div>
+      )}
+
+      {/* Canvas */}
+      <DsActiveFieldContext.Provider value={{ activeDsField, setActiveDsField, activeEntities, positions, onNavigateToModel }}>
+      <div className="ds-canvas-body">
+        <ReactFlow
+          nodes={rfNodes}
+          edges={rfEdges}
+          nodeTypes={dsNodeTypes}
+          edgeTypes={edgeTypes}
+          onNodesChange={onNodesChange}
+          onNodeDragStop={onNodeDragStop}
+          onPaneClick={() => { setActiveJoin(null); setActiveDsField(null); }}
+          nodesDraggable={isEditing}
+          nodesConnectable={false}
+          elementsSelectable={true}
+          panOnDrag
+          zoomOnScroll={false}
+          zoomOnPinch={false}
+          zoomOnDoubleClick={false}
+          preventScrolling={false}
+          proOptions={{ hideAttribution: true }}
+          onInit={onInit}
+          maxZoom={1}
+          minZoom={1}
+        >
+          <Background variant="dots" gap={20} size={1} color="rgba(0,0,0,0.1)" />
+        </ReactFlow>
+        <DsFieldPopoverLayer />
+
+        {/* Float layer */}
+        <div className="canvas-float-layer" aria-hidden="false">
+          {isEditing && (
+            <button className="float-btn float-left ds-add-model-btn" onClick={onOpenAddModel}>
+              + Add Data Model
+            </button>
+          )}
+          {!isEditing && (
+            <span className="ds-readonly-badge">Read only</span>
+          )}
+        </div>
+      </div>
+      </DsActiveFieldContext.Provider>
+
+      {/* Empty state */}
+      {activeEntities.length === 0 && (
+        <div className="ds-canvas-empty">
+          {isEditing
+            ? <><p>No Data Models yet.</p><button className="btn btn-primary" onClick={onOpenAddModel}>+ Add Data Model</button></>
+            : <p>This dataset has no Data Models configured yet. Click Edit to add some.</p>
+          }
+        </div>
+      )}
+
+      {/* Preview panel */}
+      {activeEntities.length > 0 && (() => {
+        const previewFields = activeEntities.flatMap((e) =>
+          e.fields.map((f) => ({ entity: e.id, key: f.key, label: f.label, type: f.type }))
+        );
+        const nullCount = PREVIEW_ROWS.filter((r) =>
+          previewFields.some((f) => r[f.key] === null)
+        ).length;
+        return (
+          <section className="prev-panel ds-prev-panel">
+            <header className="prev-hd">
+              <div className="prev-title">Preview · {PREVIEW_ROWS.length} rows</div>
+              {nullCount > 0 && (
+                <span className="badge badge-warn">{nullCount} row{nullCount !== 1 ? 's' : ''} with nulls</span>
+              )}
+            </header>
+            <div className="prev-scroll">
+              <table className="ptab">
+                <thead>
+                  <tr>
+                    {previewFields.map((f) => (
+                      <th key={`${f.entity}-${f.key}`} className={['#','$','fx'].includes(f.type) ? 'col-num' : ''}>
+                        {f.label}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {PREVIEW_ROWS.map((row, ri) => (
+                    <tr key={ri}>
+                      {previewFields.map((f) => (
+                        <td key={`${ri}-${f.entity}-${f.key}`} className={['#','$','fx'].includes(f.type) ? 'col-num' : ''}>
+                          {row[f.key] === null
+                            ? <span className="null-val">null</span>
+                            : row[f.key] !== undefined ? row[f.key] : <span className="null-val">—</span>
+                          }
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        );
+      })()}
+    </div>
+  );
+}
+
+// Simple entity card for the dataset canvas
+const ROLE_LABEL = { ID: 'Primary Key', DIMENSION: 'Dimension', MEASURE: 'Measure' };
+
+function DsEntityCardNode({ id, data }) {
+  const { label, source, sourceId, fields, allFields, hiddenCount, isEditing, onViewInModel, onRemove } = data;
+  const [popoverOpen, setPopoverOpen] = useState(false);
+
+  const ctx = useContext(DsActiveFieldContext);
+  const activeFieldKey = ctx?.activeDsField?.nodeId === id ? ctx.activeDsField.fieldKey : null;
+
+  const hiddenFields = allFields
+    ? allFields.filter((f) => f.visible === false || !fields.some((vf) => vf.key === f.key))
+    : [];
+
+  const handleNavigate = (e) => {
+    e.stopPropagation();
+    if (isEditing) {
+      // eslint-disable-next-line no-alert
+      if (!window.confirm('You have unsaved changes. Navigate away and lose them?')) return;
+    }
+    onViewInModel();
+  };
+
+  return (
+    <article className={`ecard ds-ecard${isEditing ? '' : ' ds-ecard-readonly'}`}>
+      <Handle type="source" position={Position.Right} id={`${id}-src`} className="entity-handle" />
+      <Handle type="target" position={Position.Left} id={`${id}-tgt`} className="entity-handle" />
+      <header className="ec-hd draggable">
+        <span className="ec-name">{label}</span>
+        {isEditing && onRemove && (
+          <button className="plain-btn ds-ecard-remove" onClick={onRemove} aria-label="Remove model" title="Remove from dataset">✕</button>
+        )}
+        <span className="ec-src" style={{ color: sourceBrandColor(sourceId) }}>{source}</span>
+      </header>
+      <div className="ec-fields">
+        {fields.map((field) => (
+          <div
+            key={field.key}
+            className={`frow ds-frow${activeFieldKey === field.key ? ' ds-frow-active' : ''}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!ctx) return;
+              ctx.setActiveDsField((prev) =>
+                prev?.nodeId === id && prev?.fieldKey === field.key
+                  ? null
+                  : { nodeId: id, fieldKey: field.key }
+              );
+            }}
+          >
+            <span className={`ftype ${field.isKey ? 'key' : ''} ${field.calc ? 'calc' : ''}`}>{field.type}</span>
+            <span className="fname">{field.label}</span>
+          </div>
+        ))}
+      </div>
+      {hiddenCount > 0 && (
+        <footer
+          className="ds-hidden-footer"
+          onMouseEnter={() => setPopoverOpen(true)}
+          onMouseLeave={() => setPopoverOpen(false)}
+        >
+          {popoverOpen && (
+            <div className="ds-hidden-popover">
+              <div className="ds-hidden-popover-title">Hidden fields</div>
+              {hiddenFields.map((f) => (
+                <div key={f.key} className="ds-hidden-popover-field">
+                  <span className={`ftype ${f.isKey ? 'key' : ''} ${f.calc ? 'calc' : ''}`}>{f.type}</span>
+                  <span>{f.label}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <span className="ds-hidden-trigger nodrag nopan">
+            {/* eye-slash icon */}
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
+              <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
+              <line x1="1" y1="1" x2="23" y2="23"/>
+            </svg>
+            <span className="ds-hidden-label">{hiddenCount} hidden field{hiddenCount !== 1 ? 's' : ''}</span>
+          </span>
+          <button
+            className="plain-btn ds-hidden-nav-btn nodrag nopan"
+            onClick={handleNavigate}
+            title="View in Data Model"
+            aria-label="View in Data Model"
+          >
+            {/* external-link / arrow-right icon */}
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+              <polyline points="15 3 21 3 21 9"/>
+              <line x1="10" y1="14" x2="21" y2="3"/>
+            </svg>
+          </button>
+        </footer>
+      )}
+    </article>
+  );
+}
+
+const dsNodeTypes = { dsEntity: DsEntityCardNode };
+
+function DatasetCanvasPane(props) {
+  return (
+    <ReactFlowProvider>
+      <DatasetCanvasPaneInner {...props} />
+    </ReactFlowProvider>
+  );
+}
+
+// ── Add Data Models modal ─────────────────────────────────────────────────
+function AddModelModal({ open, onClose, dataModels, currentModelIds, onAdd }) {
+  const [search, setSearch] = useState('');
+  const [checked, setChecked] = useState(new Set());
+
+  // Reset on open
+  useEffect(() => { if (open) { setSearch(''); setChecked(new Set()); } }, [open]);
+
+  const available = dataModels.filter(
+    (m) => !currentModelIds.includes(m.id) &&
+      (!search.trim() || m.name.toLowerCase().includes(search.trim().toLowerCase()))
+  );
+
+  const toggle = (id) => setChecked((prev) => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+
+  if (!open) return null;
+
+  return (
+    <Dialog.Root open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Backdrop className="dialog-backdrop" />
+        <Dialog.Viewport className="dialog-viewport">
+          <Dialog.Popup className="dialog-popup add-model-modal">
+            <Dialog.Title className="dialog-title">Add Data Models</Dialog.Title>
+
+          <div className="add-model-search-wrap">
+            <input
+              className="add-model-search"
+              placeholder="Search Data Models…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              autoFocus
+            />
+          </div>
+
+          <div className="add-model-list">
+            {available.length === 0 && (
+              <div className="add-model-empty">
+                {search ? 'No matching Data Models.' : 'All Data Models are already in this dataset.'}
+              </div>
+            )}
+            {available.map((m) => (
+              <label key={m.id} className="add-model-row">
+                <input
+                  type="checkbox"
+                  checked={checked.has(m.id)}
+                  onChange={() => toggle(m.id)}
+                  className="add-model-check"
+                />
+                <div className="add-model-row-info">
+                  <span className="add-model-row-name">{m.name}</span>
+                  <span className="add-model-row-source" style={{ color: sourceBrandColor(m.sourceId) }}>{m.sourceName}</span>
+                </div>
+              </label>
+            ))}
+          </div>
+
+          <div className="add-model-footer">
+            <button className="btn" onClick={() => setChecked(new Set())} disabled={checked.size === 0}>Clear</button>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn" onClick={onClose}>Cancel</button>
+              <button
+                className="btn btn-primary"
+                disabled={checked.size === 0}
+                onClick={() => { onAdd([...checked]); onClose(); }}
+              >
+                Add selected ({checked.size})
+              </button>
+            </div>
+          </div>
+          </Dialog.Popup>
+        </Dialog.Viewport>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+const OBJ_TYPE_LABELS = {
+  models: 'Data Models',
+  datasets: 'Datasets',
+  metrics: 'Metrics',
+};
+const OBJ_TYPE_DESCS = {
+  models: 'Semantic definitions of a single entity — fields, grain, and business meaning.',
+  datasets: 'Join configurations combining multiple Data Models into a queryable structure.',
+  metrics: 'Business-defined KPIs and calculated outcomes built on top of datasets.',
+};
+
+function CatalogLeftPane({
+  objectType, setObjectType, catalogSearch, setCatalogSearch,
+  selectedObjectId, selectedObjectType, onSelectItem,
+  dataModels, setDataModels, datasets, setDatasets, metrics,
+  isEditing, onOpenEditor, onEditModel, onEditDataset,
+}) {
+  const allDatasets = [...datasets.draft, ...datasets.dev, ...datasets.production];
+  const q = catalogSearch.trim().toLowerCase();
+
+  const filteredModels  = dataModels.filter((m) => !q || m.name.toLowerCase().includes(q));
+  const filteredDatasets = allDatasets.filter((d) => !q || d.name.toLowerCase().includes(q));
+  const filteredMetrics  = metrics.filter((m) => !q || m.name.toLowerCase().includes(q));
+
+  const counts = { models: dataModels.length, datasets: allDatasets.length, metrics: metrics.length };
+
+  const handleAddNew = (type) => {
+    if (type === 'model') {
+      const id = `model-${Date.now()}`;
+      const stub = { id, name: 'New Data Model', sourceId: 'sales-db', sourceName: 'Sales DB', description: '', grain: '', usedInDatasetIds: [], fields: [] };
+      setDataModels((prev) => [...prev, stub]);
+      setObjectType('models');
+      onSelectItem(id, 'models');
+    } else if (type === 'dataset') {
+      const id = `dataset-${Date.now()}`;
+      const stub = { id, name: 'New Dataset', desc: '', entities: 0, joins: 0, uses: 0, stage: 'draft', progress: 0, modelIds: [] };
+      setDatasets((prev) => ({ ...prev, draft: [...prev.draft, stub] }));
+      setObjectType('datasets');
+      onSelectItem(id, 'datasets');
+    } else if (type === 'metric') {
+      setObjectType('metrics');
+    }
+  };
+
+  return (
+    <div className="cat-left-pane">
+      {/* Search + Add row */}
+      <div className="cat-left-top">
+        <div className="cat-left-search-wrap">
+          <svg className="cat-search-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="6.5" cy="6.5" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.4"/><path d="M10 10l3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg>
+          <input
+            className="cat-left-search"
+            placeholder="Find…"
+            value={catalogSearch}
+            onChange={(e) => setCatalogSearch(e.target.value)}
+          />
+        </div>
+        <Menu.Root>
+          <Menu.Trigger className="btn cat-add-btn">Add ▾</Menu.Trigger>
+          <Menu.Portal>
+            <Menu.Positioner sideOffset={4} align="end">
+              <Menu.Popup className="menu-popup">
+                <Menu.Item className="menu-item" onClick={() => handleAddNew('model')}>New Data Model</Menu.Item>
+                <Menu.Item className="menu-item" onClick={() => handleAddNew('dataset')}>New Dataset</Menu.Item>
+                <Menu.Item className="menu-item" onClick={() => handleAddNew('metric')}>New Metric</Menu.Item>
+              </Menu.Popup>
+            </Menu.Positioner>
+          </Menu.Portal>
+        </Menu.Root>
+      </div>
+
+      {/* Type tab switcher */}
+      <div className="obj-type-tabs" role="tablist">
+        {['models', 'datasets', 'metrics'].map((t) => (
+          <button
+            key={t}
+            role="tab"
+            aria-selected={objectType === t}
+            className={`obj-type-tab ${objectType === t ? 'active' : ''}`}
+            onClick={() => setObjectType(t)}
+          >
+            {OBJ_TYPE_LABELS[t]} <span className="obj-type-count">{counts[t]}</span>
+          </button>
+        ))}
+      </div>
+
+      {/* Description */}
+      <p className="obj-type-desc">{OBJ_TYPE_DESCS[objectType]}</p>
+
+      {/* List */}
+      <div className="cat-left-list">
+        {objectType === 'models' && filteredModels.map((model) => (
+          <ModelListItem
+            key={model.id}
+            model={model}
+            selected={selectedObjectType === 'models' && selectedObjectId === model.id}
+            onClick={() => onSelectItem(model.id, 'models')}
+            onDelete={() => setDataModels((prev) => prev.filter((m) => m.id !== model.id))}
+            onEdit={() => onEditModel(model.id)}
+          />
+        ))}
+        {objectType === 'datasets' && filteredDatasets.map((ds) => (
+          <DatasetListItem
+            key={ds.id}
+            dataset={ds}
+            selected={selectedObjectType === 'datasets' && selectedObjectId === ds.id}
+            onClick={() => onSelectItem(ds.id, 'datasets')}
+            onEdit={() => onEditDataset(ds.id)}
+            onDelete={() => setDatasets((prev) => ({
+              draft: prev.draft.filter((d) => d.id !== ds.id),
+              dev: prev.dev.filter((d) => d.id !== ds.id),
+              production: prev.production.filter((d) => d.id !== ds.id),
+            }))}
+          />
+        ))}
+        {objectType === 'metrics' && filteredMetrics.map((m) => (
+          <MetricListItem
+            key={m.id}
+            metric={m}
+            selected={selectedObjectType === 'metrics' && selectedObjectId === m.id}
+            onClick={() => onSelectItem(m.id, 'metrics')}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── List item: Data Model ────────────────────────────────────────────────────
+function ModelListItem({ model, selected, onClick, onDelete, onEdit }) {
+  const used = model.usedInDatasetIds.length > 0;
+  const visibleCount = model.fields.filter((f) => f.visible !== false).length;
+  const totalCount = model.fields.length;
+
+  return (
+    <div
+      className={`obj-list-item ${selected ? 'selected' : ''}`}
+      onClick={onClick}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === 'Enter') onClick(); }}
+    >
+      <div className="obj-list-main">
+        <div className="obj-list-name-row">
+          <span className="obj-list-name">{model.name}</span>
+        </div>
+        <div className="obj-list-source" style={{ color: sourceBrandColor(model.sourceId) }}>{model.sourceName}</div>
+      </div>
+      <div className="obj-list-right">
+        <TooltipPrimitive.Provider delayDuration={300}>
+          <TooltipPrimitive.Root>
+            <TooltipPrimitive.Trigger asChild>
+              <span className={`obj-list-dot ${used ? 'used' : ''}`} aria-label={used ? 'Used in datasets' : 'Not used'} />
+            </TooltipPrimitive.Trigger>
+            <TooltipPrimitive.Portal>
+              <TooltipPrimitive.Content className="obj-tooltip" sideOffset={5}>
+                {used
+                  ? `Used in: ${model.usedInDatasetIds.join(', ')}`
+                  : 'Not used in any dataset yet.'}
+                <TooltipPrimitive.Arrow className="obj-tooltip-arrow" />
+              </TooltipPrimitive.Content>
+            </TooltipPrimitive.Portal>
+          </TooltipPrimitive.Root>
+        </TooltipPrimitive.Provider>
+        <span className="obj-list-fields">{visibleCount} of {totalCount} fields</span>
+      </div>
+      <Menu.Root>
+        <Menu.Trigger className="plain-btn obj-list-menu" onClick={(e) => e.stopPropagation()} aria-label="Model options">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <circle cx="7" cy="2.5" r="1.25" fill="currentColor"/>
+            <circle cx="7" cy="7" r="1.25" fill="currentColor"/>
+            <circle cx="7" cy="11.5" r="1.25" fill="currentColor"/>
+          </svg>
+        </Menu.Trigger>
+        <Menu.Portal>
+          <Menu.Positioner>
+            <Menu.Popup className="menu-popup" side="top" align="end" sideOffset={6}>
+              <Menu.Item className="menu-item" onClick={(e) => { e.stopPropagation(); onEdit(); }}>Edit</Menu.Item>
+              <Menu.Item className="menu-item danger" onClick={(e) => { e.stopPropagation(); onDelete(); }}>Delete</Menu.Item>
+            </Menu.Popup>
+          </Menu.Positioner>
+        </Menu.Portal>
+      </Menu.Root>
+    </div>
+  );
+}
+
+// ── List item: Dataset ───────────────────────────────────────────────────────
+function DatasetListItem({ dataset, selected, onClick, onEdit, onDelete }) {
+  const usageScore = usageScoreFromCount(dataset.uses);
+  return (
+    <div
+      className={`obj-list-item ${selected ? 'selected' : ''}`}
+      onClick={onClick}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === 'Enter') onClick(); }}
+    >
+      <div className="obj-list-main">
+        <div className="obj-list-name-row">
+          <span className="obj-list-name">{dataset.name}</span>
+        </div>
+        <div className="obj-list-meta">{dataset.entities} Entities · {dataset.joins} Joins</div>
+      </div>
+      <div className="obj-list-right">
+        <span className="mcard-usage" aria-label={`Usage score ${usageScore} of 5`}>
+          <span className="mcard-usage-dots" aria-hidden="true">
+            {Array.from({ length: 5 }, (_, i) => (
+              <span key={i} className={`mcard-usage-dot ${i < usageScore ? 'is-filled' : ''}`} />
+            ))}
+          </span>
+          <span className="mcard-uses">{dataset.uses}</span>
+        </span>
+      </div>
+      <Menu.Root>
+        <Menu.Trigger className="plain-btn obj-list-menu" onClick={(e) => e.stopPropagation()} aria-label="Dataset options">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <circle cx="7" cy="2.5" r="1.25" fill="currentColor"/>
+            <circle cx="7" cy="7" r="1.25" fill="currentColor"/>
+            <circle cx="7" cy="11.5" r="1.25" fill="currentColor"/>
+          </svg>
+        </Menu.Trigger>
+        <Menu.Portal>
+          <Menu.Positioner>
+            <Menu.Popup className="menu-popup" side="top" align="end" sideOffset={6}>
+              <Menu.Item className="menu-item" onClick={(e) => { e.stopPropagation(); onEdit(); }}>Edit</Menu.Item>
+              <Menu.Item className="menu-item danger" onClick={(e) => { e.stopPropagation(); onDelete(); }}>Delete</Menu.Item>
+            </Menu.Popup>
+          </Menu.Positioner>
+        </Menu.Portal>
+      </Menu.Root>
+    </div>
+  );
+}
+
+// ── List item: Metric ────────────────────────────────────────────────────────
+function MetricListItem({ metric, selected, onClick }) {
+  return (
+    <div
+      className={`obj-list-item ${selected ? 'selected' : ''}`}
+      onClick={onClick}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === 'Enter') onClick(); }}
+    >
+      <div className="obj-list-main">
+        <span className="obj-list-name">{metric.name}</span>
+        <div className="obj-list-meta">{metric.aggregation} · {metric.datasetId}</div>
+      </div>
+      <span className={`badge badge-neutral`}>{metric.aggregation}</span>
+    </div>
+  );
+}
+
+// ── Data Model detail pane ───────────────────────────────────────────────────
+function DataModelDetail({ model, isEditing, editDraft, setIsEditing, setEditDraft, onSave, onCancel }) {
+  const [fieldSearch, setFieldSearch] = useState('');
+  if (!model) return null;
+
+  const active = isEditing ? editDraft : model;
+  const visibleCount = active.fields.filter((f) => f.visible !== false).length;
+
+  const q = fieldSearch.trim().toLowerCase();
+  const dimensionFields = active.fields.filter((f) => f.role !== 'MEASURE' && (!q || f.key.toLowerCase().includes(q) || f.label.toLowerCase().includes(q)));
+  const measureFields   = active.fields.filter((f) => f.role === 'MEASURE'  && (!q || f.key.toLowerCase().includes(q) || f.label.toLowerCase().includes(q)));
+
+  const handleEdit = () => {
+    setEditDraft(JSON.parse(JSON.stringify(model)));
+    setIsEditing(true);
+  };
+
+  const updateDraftField = (fieldKey, prop, value) => {
+    setEditDraft((prev) => ({
+      ...prev,
+      fields: prev.fields.map((f) => f.key === fieldKey ? { ...f, [prop]: value } : f),
+    }));
+  };
+
+  const toggleFieldVisible = (fieldKey) => {
+    if (isEditing) {
+      updateDraftField(fieldKey, 'visible', !(editDraft.fields.find((f) => f.key === fieldKey)?.visible ?? true));
+    }
+  };
+
+  return (
+    <div className="dm-detail">
+      {/* Header */}
+      <div className="dm-header">
+        <div className="dm-header-left">
+          {isEditing ? (
+            <input
+              className="dm-name-input"
+              value={editDraft.name}
+              onChange={(e) => setEditDraft((p) => ({ ...p, name: e.target.value }))}
+              autoFocus
+            />
+          ) : (
+            <h2 className="dm-title">{model.name}</h2>
+          )}
+          <span className="dm-source-label" style={{ color: sourceBrandColor(model.sourceId) }}>{model.sourceName}</span>
+        </div>
+        <div className="dm-header-actions">
+          {isEditing ? (
+            <>
+              <button className="btn" onClick={onCancel}>Cancel</button>
+              <button className="btn btn-primary" onClick={() => onSave(editDraft)}>Save</button>
+            </>
+          ) : (
+            <button className="btn" onClick={handleEdit}>Edit</button>
+          )}
+        </div>
+      </div>
+
+      {/* Description */}
+      {isEditing ? (
+        <textarea
+          className="dm-desc-ta"
+          value={editDraft.description}
+          onChange={(e) => setEditDraft((p) => ({ ...p, description: e.target.value }))}
+          placeholder="Describe this model for AI and collaborators…"
+        />
+      ) : (
+        <p className="dm-desc">{model.description}</p>
+      )}
+
+      {/* Fields section header */}
+      <div className="dm-fields-header">
+        <span className="dm-fields-title">Visible fields <span className="dm-fields-count">({visibleCount} of {active.fields.length})</span></span>
+        <input
+          className="dm-field-search"
+          placeholder="Search fields…"
+          value={fieldSearch}
+          onChange={(e) => setFieldSearch(e.target.value)}
+        />
+      </div>
+
+      {/* Fields table */}
+      <table className="dm-fields-table">
+        <thead>
+          <tr>
+            <th className="dm-th dm-th-check">
+              <input type="checkbox" style={{ opacity: 0, pointerEvents: 'none' }} aria-hidden="true" />
+            </th>
+            <th className="dm-th dm-th-field">Field</th>
+            <th className="dm-th dm-th-display">Display name</th>
+            <th className="dm-th dm-th-role">Role</th>
+            <th className="dm-th dm-th-desc">Description</th>
+            <th className="dm-th dm-th-opts">
+              <button className="plain-btn dm-col-opts" aria-label="Column options">⋯</button>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {dimensionFields.length > 0 && (
+            <>
+              <tr className="dm-group-row">
+                <td colSpan={6}>
+                  <span className="dm-group-label">Dimensions</span>
+                  <span className="dm-group-count">{dimensionFields.length}</span>
+                </td>
+              </tr>
+              {dimensionFields.map((field) => (
+                <DataModelFieldRow
+                  key={field.key}
+                  field={field}
+                  isEditing={isEditing}
+                  onToggleVisible={() => toggleFieldVisible(field.key)}
+                  onUpdateField={(prop, val) => updateDraftField(field.key, prop, val)}
+                />
+              ))}
+            </>
+          )}
+          {measureFields.length > 0 && (
+            <>
+              <tr className="dm-group-row">
+                <td colSpan={6}>
+                  <span className="dm-group-label">Measures</span>
+                  <span className="dm-group-count">{measureFields.length}</span>
+                </td>
+              </tr>
+              {measureFields.map((field) => (
+                <DataModelFieldRow
+                  key={field.key}
+                  field={field}
+                  isEditing={isEditing}
+                  onToggleVisible={() => toggleFieldVisible(field.key)}
+                  onUpdateField={(prop, val) => updateDraftField(field.key, prop, val)}
+                />
+              ))}
+            </>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function DataModelFieldRow({ field, isEditing, onToggleVisible, onUpdateField }) {
+  const isVisible = field.visible !== false;
+  const autoName = autoDisplayName(field.key);
+  const displayName = field.displayName || '';
+  const isAutoName = !displayName || displayName === autoName;
+
+  return (
+    <tr className={`dm-field-row ${!isVisible ? 'dm-row-hidden' : ''}`}>
+      <td className="dm-td dm-td-check">
+        <input
+          type="checkbox"
+          checked={isVisible}
+          onChange={onToggleVisible}
+          disabled={!isEditing}
+          aria-label={`Include ${field.label}`}
+        />
+      </td>
+      <td className="dm-td dm-td-field">
+        <span className={`ftype ${field.isKey ? 'key' : ''} ${field.calc ? 'calc' : ''}`}>{field.type}</span>
+        <span className="dm-field-name">{field.label}</span>
+      </td>
+      <td className="dm-td dm-td-display">
+        {isEditing ? (
+          <input
+            className="dm-cell-input"
+            value={displayName}
+            placeholder={autoName}
+            onChange={(e) => onUpdateField('displayName', e.target.value)}
+          />
+        ) : (
+          <span className={isAutoName ? 'dm-auto-name' : 'dm-custom-name'}>
+            {displayName || autoName}
+          </span>
+        )}
+      </td>
+      <td className="dm-td dm-td-role">
+        {isEditing ? (
+          <Select.Root
+            value={field.role}
+            onValueChange={(v) => onUpdateField('role', v)}
+            items={['ID', 'DIMENSION', 'MEASURE']}
+          >
+            <Select.Trigger className="bu-trigger dm-role-trigger">
+              <Select.Value />
+              <Select.Icon className="bu-icon">▾</Select.Icon>
+            </Select.Trigger>
+            <Select.Portal>
+              <Select.Positioner>
+                <Select.Popup className="bu-popup">
+                  <Select.List>
+                    {['ID', 'DIMENSION', 'MEASURE'].map((r) => (
+                      <Select.Item key={r} value={r} className="bu-item">
+                        <Select.ItemText>{r}</Select.ItemText>
+                      </Select.Item>
+                    ))}
+                  </Select.List>
+                </Select.Popup>
+              </Select.Positioner>
+            </Select.Portal>
+          </Select.Root>
+        ) : (
+          <span className={`role-pill role-${field.role?.toLowerCase()}`}>{field.role}</span>
+        )}
+      </td>
+      <td className="dm-td dm-td-desc">
+        {isEditing ? (
+          <input
+            className="dm-cell-input"
+            value={field.semanticDesc || ''}
+            placeholder="Add a description…"
+            onChange={(e) => onUpdateField('semanticDesc', e.target.value)}
+          />
+        ) : (
+          <span className="dm-desc-cell" title={field.semanticDesc}>{field.semanticDesc}</span>
+        )}
+      </td>
+      <td className="dm-td dm-td-opts" />
+    </tr>
+  );
+}
+
 function App() {
   const [view, setView] = useState('catalog');
-  const [search, setSearch] = useState('');
+  // eslint-disable-next-line no-unused-vars
+  const [search] = useState('');
   const [stage, setStage] = useState('dev');
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
@@ -1175,16 +2398,25 @@ function App() {
 
   // Lifted to state so new entities and models can be added
   const [canvasEntities, setCanvasEntities] = useState(INITIAL_ENTITIES);
+  // eslint-disable-next-line no-unused-vars
   const [models, setModels] = useState(MODELS);
 
-  // Catalog tab
-  const [catalogTab, setCatalogTab] = useState('models'); // 'models' | 'sources'
-  const [sourcesSearch, setSourcesSearch] = useState('');
+  // ── Catalog state (new two-pane layout) ────────────────────────────────
+  const [objectType, setObjectType] = useState('models'); // left-pane tab only
+  const [selectedObjectId, setSelectedObjectId] = useState(null);  // right-pane item id
+  const [selectedObjectType, setSelectedObjectType] = useState(null); // right-pane item type
+  const [catalogSearch, setCatalogSearch] = useState('');
+  const [isEditing, setIsEditing] = useState(false);
+  const [editDraft, setEditDraft] = useState(null);
+  const [dataModels, setDataModels] = useState(DATA_MODELS_INITIAL);
+  const [datasets, setDatasets] = useState(DATASETS_INITIAL);
+  const [metrics] = useState(METRICS_INITIAL);
+  const [addModelOpen, setAddModelOpen] = useState(false);
 
   // Add data source modal state
   const [addSourceOpen, setAddSourceOpen] = useState(false);
   const [addSourceContext, setAddSourceContext] = useState('editor'); // 'editor' | 'new-model'
-  const [connectedSources, setConnectedSources] = useState(() => new Set(['sales-db', 'product-db']));
+  const [connectedSources] = useState(() => new Set(['sales-db', 'product-db']));
   const [newModelName, setNewModelName] = useState('');
   const [expandedSources, setExpandedSources] = useState(new Set());
   const [addModalSearch, setAddModalSearch] = useState('');
@@ -1503,16 +2735,6 @@ function App() {
     return JSON.stringify(obj, null, 2);
   }, [stage, canvasEntities, hiddenFields, fieldDisplayNames, fieldDescriptions, fieldFormulas, joins]);
 
-  const filteredModels = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return models;
-    return {
-      draft: models.draft.filter((item) => item.name.toLowerCase().includes(q)),
-      dev: models.dev.filter((item) => item.name.toLowerCase().includes(q)),
-      production: models.production.filter((item) => item.name.toLowerCase().includes(q)),
-    };
-  }, [search, models]);
-
   const selectField = (entityId, field) => {
     if (!entityId || !field) { setActiveField(null); return; }
     setActiveField({ entityId, fieldKey: field.key, source: `${entityId}.${field.key}`, type: field.type });
@@ -1590,10 +2812,6 @@ function App() {
     setAddModalSearch('');
     setExpandedSources(new Set());
     setAddSourceOpen(true);
-  };
-
-  const handleConnectSource = (sourceId) => {
-    setConnectedSources((prev) => new Set([...prev, sourceId]));
   };
 
   // Direct-toggle: checking a table immediately adds/removes it from the canvas
@@ -1695,8 +2913,6 @@ function App() {
     resetAddSourceState();
   };
 
-  const handleNewModelClick = () => openAddSource('new-model');
-
   // ─────────────────────────────────────────────────────────────────────────
 
   return (
@@ -1707,24 +2923,25 @@ function App() {
           {view === 'catalog' ? (
             <div className="nav-brand">
               <span className="nav-brand-dot" />
-              Reveal
+              <span>Reveal</span>
+              <span className="nav-brand-sub">Data Catalog</span>
             </div>
           ) : (
             <>
-              <button className="plain-btn nav-back" title="Back to models" onClick={() => setView('catalog')}>←</button>
+              <button className="plain-btn nav-back" title="Back to catalog" onClick={() => setView('catalog')}>←</button>
               <Menu.Root>
                 <Menu.Trigger className="plain-btn nav-model-btn">Sales overview ▾</Menu.Trigger>
                 <Menu.Portal>
                   <Menu.Positioner sideOffset={6}>
                     <Menu.Popup className="menu-popup">
-                      <Menu.Item className="menu-item">Rename model</Menu.Item>
+                      <Menu.Item className="menu-item">Rename dataset</Menu.Item>
                       <Menu.Item className="menu-item">Edit description</Menu.Item>
                       <Menu.Item className="menu-item">Duplicate</Menu.Item>
                       <Menu.Separator className="menu-sep" />
                       <Menu.Item className="menu-item" onClick={() => setStage('production')}>Promote to production</Menu.Item>
                       <Menu.Item className="menu-item" onClick={() => setStage('draft')}>Move to draft</Menu.Item>
                       <Menu.Separator className="menu-sep" />
-                      <Menu.Item className="menu-item danger">Delete model</Menu.Item>
+                      <Menu.Item className="menu-item danger">Delete dataset</Menu.Item>
                     </Menu.Popup>
                   </Menu.Positioner>
                 </Menu.Portal>
@@ -1770,10 +2987,15 @@ function App() {
         )}
 
         {/* ── Right ── */}
+        {view === 'catalog' && (
+          <div className="nav-right">
+            <button className="btn" onClick={() => setAddSourceOpen(true)}>Edit data sources</button>
+          </div>
+        )}
         {view === 'editor' && (
           <div className="nav-right">
             <button className="btn" onClick={() => setView('inspect')}>Inspect view</button>
-            <button className="btn btn-primary" onClick={() => setAiOpen(true)}>Save model</button>
+            <button className="btn btn-primary" onClick={() => setAiOpen(true)}>Save dataset</button>
           </div>
         )}
         {view === 'inspect' && (
@@ -1786,141 +3008,140 @@ function App() {
 
       {view === 'catalog' ? (
         <section className="view active">
-          <div className="cat-bar">
-            <div className="cat-bar-inner">
-              <nav className="cat-tabs">
-                <button className={`cat-tab ${catalogTab === 'models' ? 'active' : ''}`} onClick={() => setCatalogTab('models')}>Models</button>
-                <button className={`cat-tab ${catalogTab === 'sources' ? 'active' : ''}`} onClick={() => setCatalogTab('sources')}>Data Sources</button>
-              </nav>
-              {catalogTab === 'models' && (
-                <div className="cat-bar-right">
-                  <input className="search-input" placeholder="Search models…" value={search} onChange={(e) => setSearch(e.target.value)} />
-                  <button className="btn btn-primary" onClick={handleNewModelClick}>+ New model</button>
+          <div className="catalog-layout">
+            <CatalogLeftPane
+              objectType={objectType}
+              setObjectType={setObjectType}
+              catalogSearch={catalogSearch}
+              setCatalogSearch={setCatalogSearch}
+              selectedObjectId={selectedObjectId}
+              selectedObjectType={selectedObjectType}
+              onSelectItem={(id, type) => { setSelectedObjectId(id); setSelectedObjectType(type); setIsEditing(false); setEditDraft(null); }}
+              dataModels={dataModels}
+              setDataModels={setDataModels}
+              datasets={datasets}
+              setDatasets={setDatasets}
+              metrics={metrics}
+              isEditing={isEditing}
+              onOpenEditor={(datasetStage) => { setView('editor'); setStage(datasetStage); }}
+              onEditModel={(modelId) => {
+                const model = dataModels.find((m) => m.id === modelId);
+                if (!model) return;
+                setSelectedObjectId(modelId);
+                setSelectedObjectType('models');
+                setEditDraft(JSON.parse(JSON.stringify(model)));
+                setIsEditing(true);
+              }}
+              onEditDataset={(dsId) => {
+                const allDs = [...datasets.draft, ...datasets.dev, ...datasets.production];
+                const ds = allDs.find((d) => d.id === dsId);
+                if (!ds) return;
+                setSelectedObjectId(dsId);
+                setSelectedObjectType('datasets');
+                setEditDraft(JSON.parse(JSON.stringify(ds)));
+                setIsEditing(true);
+              }}
+            />
+            <div className="cat-right-pane">
+              {/* Data Model detail */}
+              {selectedObjectType === 'models' && selectedObjectId && (
+                <DataModelDetail
+                  model={dataModels.find((m) => m.id === selectedObjectId)}
+                  isEditing={isEditing}
+                  editDraft={editDraft}
+                  setIsEditing={setIsEditing}
+                  setEditDraft={setEditDraft}
+                  onSave={(draft) => {
+                    setDataModels((prev) => prev.map((m) => m.id === draft.id ? draft : m));
+                    setIsEditing(false);
+                    setEditDraft(null);
+                  }}
+                  onCancel={() => { setIsEditing(false); setEditDraft(null); }}
+                />
+              )}
+
+              {/* Dataset canvas */}
+              {selectedObjectType === 'datasets' && selectedObjectId && (() => {
+                const allDs = [...datasets.draft, ...datasets.dev, ...datasets.production];
+                const ds = allDs.find((d) => d.id === selectedObjectId);
+                if (!ds) return null;
+                return (
+                  <DatasetCanvasPane
+                    key={selectedObjectId}
+                    dataset={ds}
+                    dataModels={dataModels}
+                    isEditing={isEditing}
+                    editDraft={editDraft}
+                    setEditDraft={setEditDraft}
+                    onEdit={() => {
+                      setEditDraft(JSON.parse(JSON.stringify(ds)));
+                      setIsEditing(true);
+                    }}
+                    onCancel={() => { setIsEditing(false); setEditDraft(null); }}
+                    onSave={(draft) => {
+                      setDatasets((prev) => {
+                        const update = (arr) => arr.map((d) => d.id === draft.id ? { ...d, ...draft } : d);
+                        return { draft: update(prev.draft), dev: update(prev.dev), production: update(prev.production) };
+                      });
+                      setIsEditing(false);
+                      setEditDraft(null);
+                    }}
+                    onOpenAddModel={() => setAddModelOpen(true)}
+                    onNavigateToModel={(id) => {
+                      setObjectType('models');
+                      setSelectedObjectId(id);
+                      setSelectedObjectType('models');
+                      setIsEditing(false);
+                      setEditDraft(null);
+                    }}
+                  />
+                );
+              })()}
+
+              {/* Empty states — shown when nothing of the current tab type is selected */}
+              {!selectedObjectId && objectType === 'models' && (
+                <div className="cat-right-empty">
+                  <p>Select a Data Model from the list to view its fields and semantic definitions.</p>
                 </div>
               )}
-              {catalogTab === 'sources' && (
-                <div className="cat-bar-right">
-                  <input className="search-input" placeholder="Search data sources…" value={sourcesSearch} onChange={(e) => setSourcesSearch(e.target.value)} />
+              {!selectedObjectId && objectType === 'datasets' && (
+                <div className="cat-right-empty">
+                  <p>Select a Dataset to inspect its join canvas and field configuration.</p>
+                </div>
+              )}
+              {!selectedObjectId && objectType === 'metrics' && (
+                <div className="cat-right-empty">
+                  <p>Select a Metric to view its definition and dataset context.</p>
+                </div>
+              )}
+              {/* Cross-type selection hint */}
+              {selectedObjectId && selectedObjectType !== objectType && (
+                <div className="cat-right-cross-hint">
+                  Showing {selectedObjectType} detail. Select an item from the list above to switch.
                 </div>
               )}
             </div>
           </div>
 
-          {catalogTab === 'models' && (
-            <div className="kanban">
-              {[
-                ['Draft', filteredModels.draft],
-                ['Testing', filteredModels.dev],
-                ['Production', filteredModels.production],
-              ].map(([label, list]) => (
-                <div key={label}>
-                  <div className="kcol-head">
-                    <span className="kcol-label">{label}</span>
-                    <span className="kcol-count">{list.length}</span>
-                  </div>
-                  {list.map((model) => {
-                    const usageScore = usageScoreFromCount(model.uses);
-                    return (
-                      <button key={model.id} className="plain-btn mcard" onClick={() => { setView('editor'); setStage(model.stage); }}>
-                        <div className="mcard-head">
-                          <div className="mcard-name">{model.name}</div>
-                          <span className="mcard-usage" aria-label={`Usage score ${usageScore} out of 5 from ${model.uses} uses`}>
-                            <span className="mcard-usage-dots" aria-hidden="true">
-                              {Array.from({ length: 5 }, (_, i) => (
-                                <span key={`${model.id}-usage-${i}`} className={`mcard-usage-dot ${i < usageScore ? 'is-filled' : ''}`} />
-                              ))}
-                            </span>
-                            <span className="mcard-uses">{model.uses}</span>
-                          </span>
-                        </div>
-                        <div className="mcard-desc">{model.desc}</div>
-                        <div className="mcard-foot">
-                          <span className="badge badge-neutral">{model.entities} entities</span>
-                          <span className="badge badge-neutral">{model.joins} joins</span>
-                          <span className={`badge ${model.stage === 'production' ? 'badge-prod' : model.stage === 'dev' ? 'badge-dev' : 'badge-draft'}`}>{model.stage === 'dev' ? 'testing' : model.stage}</span>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              ))}
-            </div>
-          )}
-
-          {catalogTab === 'sources' && (() => {
-            const q = sourcesSearch.toLowerCase().trim();
-            const filteredConnected = groupedSources.filter((s) => !q || s.name.toLowerCase().includes(q));
-            const filteredAvailable = CONNECTOR_CATEGORIES.map((cat) => ({
-              ...cat,
-              items: cat.items.filter((item) => !connectedSources.has(item.id) && (!q || item.name.toLowerCase().includes(q))),
-            })).filter((cat) => cat.items.length > 0);
-            return (
-              <div className="sources-page">
-                <div className="sources-content">
-                  {/* Connected grid */}
-                  {filteredConnected.length > 0 && (
-                    <div className="sources-grid">
-                      {filteredConnected.map((source) => {
-                        const cat = ITEM_CATEGORY_MAP[source.id];
-                        const bg = CAT_COLORS[cat] || '#f0f0f0';
-                        return (
-                          <div key={source.id} className="source-tile source-tile--connected">
-                            <div className="source-tile-icon" style={{ background: bg }}>
-                              {CONNECTOR_ICONS[source.id]
-                                ? <img src={`https://cdn.simpleicons.org/${CONNECTOR_ICONS[source.id]}`} alt="" className="source-row-img" />
-                                : <span>{connectorAbbr(source.name)}</span>}
-                            </div>
-                            <div className="source-tile-body">
-                              <div className="source-row-name">{source.name}</div>
-                              <div className="source-row-meta">{CATEGORY_LABELS[cat] || cat} · {source.tables.length} tables{source.views.length ? ` · ${source.views.length} views` : ''}</div>
-                            </div>
-                            <span className="source-row-status">✓ Connected</span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  {/* Separator */}
-                  {filteredConnected.length > 0 && filteredAvailable.length > 0 && (
-                    <hr className="sources-sep" />
-                  )}
-
-                  {/* Available grid grouped by category */}
-                  {filteredAvailable.map((cat) => (
-                    <div key={cat.category} className="sources-cat-block">
-                      <div className="sources-cat-label">{CATEGORY_LABELS[cat.category] || cat.category}</div>
-                      <div className="sources-grid">
-                        {cat.items.map((item) => {
-                          const bg = CAT_COLORS[cat.category] || '#f0f0f0';
-                          return (
-                            <div key={item.id} className="source-tile">
-                              <div className="source-tile-icon" style={{ background: bg }}>
-                                {CONNECTOR_ICONS[item.id]
-                                  ? <img src={`https://cdn.simpleicons.org/${CONNECTOR_ICONS[item.id]}`} alt="" className="source-row-img" />
-                                  : <span>{connectorAbbr(item.name)}</span>}
-                              </div>
-                              <div className="source-tile-body">
-                                <div className="source-row-name">{item.name}</div>
-                                <div className="source-row-meta">{CATEGORY_LABELS[cat.category] || cat.category}</div>
-                              </div>
-                              <button className="btn source-row-connect-btn" onClick={() => handleConnectSource(item.id)}>
-                                Connect
-                              </button>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ))}
-
-                  {filteredConnected.length === 0 && filteredAvailable.length === 0 && (
-                    <p className="sources-empty">No data sources match "{sourcesSearch}"</p>
-                  )}
-                </div>
-              </div>
-            );
-          })()}
+          {/* Add Data Models modal — always rendered when a dataset is selected so it persists across tab switches */}
+          <AddModelModal
+            open={addModelOpen}
+            onClose={() => setAddModelOpen(false)}
+            dataModels={dataModels}
+            currentModelIds={(() => {
+              const allDs = [...datasets.draft, ...datasets.dev, ...datasets.production];
+              const ds = editDraft ?? allDs.find((d) => d.id === selectedObjectId);
+              return ds?.modelIds ?? [];
+            })()}
+            onAdd={(newIds) => {
+              const allDs = [...datasets.draft, ...datasets.dev, ...datasets.production];
+              setEditDraft((prev) => {
+                const base = prev ?? JSON.parse(JSON.stringify(allDs.find((d) => d.id === selectedObjectId) ?? {}));
+                return { ...base, modelIds: [...new Set([...(base.modelIds ?? []), ...newIds])] };
+              });
+              setIsEditing(true);
+            }}
+          />
         </section>
       ) : null}
 
