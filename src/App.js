@@ -5,6 +5,7 @@ import { Select } from './components/ui/select';
 import { Switch } from './components/ui/switch';
 import { Tabs } from './components/ui/tabs';
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
+import * as TooltipPrimitive from '@radix-ui/react-tooltip';
 import {
   ReactFlow, Background, Handle, Position,
   getBezierPath, EdgeLabelRenderer,
@@ -13,19 +14,160 @@ import {
 import Dagre from '@dagrejs/dagre';
 import './App.css';
 
-const MODELS = {
+// ── Source brand colors ──────────────────────────────────────────────────────
+const SOURCE_BRAND_COLORS = {
+  'sales-db':        '#336791',
+  'product-db':      '#e48e00',
+  'hubspot':         '#ff5c35',
+  'salesforce':      '#00a1e0',
+  'snowflake':       '#29b5e8',
+  'google-bigquery': '#4285f4',
+  'google-analytics':'#e37400',
+  'amazon-redshift': '#8c4fff',
+  'databricks':      '#ff3621',
+};
+const SOURCE_BRAND_COLOR_DEFAULT = '#6f675d';
+
+function sourceBrandColor(sourceId) {
+  return SOURCE_BRAND_COLORS[sourceId] || SOURCE_BRAND_COLOR_DEFAULT;
+}
+
+function darkenColor(hex, lightnessReduce = 0.19) {
+  const h = hex.replace('#', '');
+  let r = parseInt(h.slice(0, 2), 16) / 255;
+  let g = parseInt(h.slice(2, 4), 16) / 255;
+  let b = parseInt(h.slice(4, 6), 16) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let hue = 0, sat = 0, lit = (max + min) / 2;
+  if (max !== min) {
+    const d = max - min;
+    sat = lit > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r) hue = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+    else if (max === g) hue = ((b - r) / d + 2) / 6;
+    else hue = ((r - g) / d + 4) / 6;
+  }
+  lit = Math.max(0, lit - lightnessReduce);
+  const hue2rgb = (p, q, t) => {
+    if (t < 0) t += 1; if (t > 1) t -= 1;
+    if (t < 1/6) return p + (q - p) * 6 * t;
+    if (t < 1/2) return q;
+    if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+    return p;
+  };
+  if (sat === 0) { r = g = b = lit; } else {
+    const q = lit < 0.5 ? lit * (1 + sat) : lit + sat - lit * sat;
+    const p = 2 * lit - q;
+    r = hue2rgb(p, q, hue + 1/3);
+    g = hue2rgb(p, q, hue);
+    b = hue2rgb(p, q, hue - 1/3);
+  }
+  return `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
+}
+
+function autoDisplayName(fieldKey) {
+  return fieldKey
+    .split('_')
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
+// ── Data Models (single-entity semantic definitions, no joins) ────────────────
+const DATA_MODELS_INITIAL = [
+  {
+    id: 'orders', name: 'Orders', sourceId: 'sales-db', sourceName: 'Sales DB',
+    description: 'Each record represents an individual order line item placed by a customer. Use to analyze revenue, volume, and order-level trends over time.',
+    grain: 'One row per order line item',
+    usedInDatasetIds: ['sales-overview', 'revenue-summary'],
+    fields: [
+      { key: 'order_id',    label: 'order_id',    type: '#',  isKey: true, role: 'ID',        visible: true,  synonyms: 'transaction ID, purchase ID', semanticDesc: 'Unique identifier per order line item. Use COUNT(DISTINCT order_id) to measure order volume. Never aggregate directly.' },
+      { key: 'customer_id', label: 'customer_id', type: '#',  role: 'DIMENSION', visible: true,  synonyms: 'buyer ID, client ID', semanticDesc: 'Foreign key to the customers table. Null values indicate guest or unattributed orders.' },
+      { key: 'product_id',  label: 'product_id',  type: '#',  role: 'DIMENSION', visible: true,  semanticDesc: 'Foreign key to the products table. Orders without a matching product SKU are excluded via INNER JOIN.' },
+      { key: 'order_date',  label: 'order_date',  type: 'dt', role: 'DIMENSION', visible: true,  synonyms: 'transaction date, purchase date, sale date', semanticDesc: 'Date the order was placed (UTC). Primary time axis for this model.' },
+      { key: 'amount',      label: 'amount',      type: '$',  role: 'MEASURE',   visible: true,  agg: 'SUM', synonyms: 'revenue, GMV, gross sales, total', semanticDesc: 'Gross order revenue in USD before discounts or cost deductions. Aggregate with SUM.' },
+      { key: 'revenue_net', label: 'revenue_net', type: 'fx', role: 'MEASURE',   visible: true,  agg: 'SUM', calc: true, synonyms: 'net revenue, margin revenue', semanticDesc: 'Net revenue after deducting customer discounts and unit cost. Preferred metric for profitability.' },
+    ],
+  },
+  {
+    id: 'customers', name: 'Customers', sourceId: 'sales-db', sourceName: 'Sales DB',
+    description: 'Each record represents a unique, deduplicated customer identity. Use to segment, filter, and profile buyers across orders.',
+    grain: 'One row per customer',
+    usedInDatasetIds: ['sales-overview', 'customer-ltv'],
+    fields: [
+      { key: 'customer_id', label: 'customer_id', type: '#',  isKey: true, role: 'ID',        visible: true,  synonyms: 'buyer, client, user ID', semanticDesc: 'Primary key for the customers table. Use to JOIN with orders.customer_id.' },
+      { key: 'full_name',   label: 'full_name',   type: 'Aa', role: 'DIMENSION', visible: true,  synonyms: 'name, customer name, display name', semanticDesc: "Customer's display name. Use for labeling. Avoid joining on this field; use customer_id." },
+      { key: 'region',      label: 'region',      type: 'Aa', role: 'DIMENSION', visible: true,  semanticDesc: 'Geographic sales region (e.g. APAC, LATAM, EMEA, NA).' },
+      { key: 'segment',     label: 'segment',     type: 'Aa', role: 'DIMENSION', visible: true,  synonyms: 'tier, market segment, company size', semanticDesc: 'Customer market tier (e.g. Enterprise, Mid-Market, SMB). Key dimension for cohort analysis.' },
+    ],
+  },
+  {
+    id: 'products', name: 'Products', sourceId: 'product-db', sourceName: 'Product DB',
+    description: 'Each record represents a product SKU in the catalog. Use to enrich order data with product attributes, category, and cost.',
+    grain: 'One row per product SKU',
+    usedInDatasetIds: ['sales-overview', 'revenue-summary'],
+    fields: [
+      { key: 'product_id',   label: 'product_id',   type: '#',  isKey: true, role: 'ID',        visible: true,  semanticDesc: 'Primary key for the product catalog. Use to JOIN with orders.product_id.' },
+      { key: 'product_name', label: 'product_name', type: 'Aa', role: 'DIMENSION', visible: true,  semanticDesc: 'Human-readable product name. For grouping across product lines, prefer category.' },
+      { key: 'category',     label: 'category',     type: 'Aa', role: 'DIMENSION', visible: true,  semanticDesc: 'Product line grouping (e.g. Licenses, Services, Hardware).' },
+      { key: 'unit_cost',    label: 'unit_cost',    type: '$',  role: 'MEASURE',   visible: false, agg: 'AVG', semanticDesc: 'Cost to the business per product unit in USD.' },
+    ],
+  },
+  {
+    id: 'returns', name: 'Returns', sourceId: 'sales-db', sourceName: 'Sales DB',
+    description: 'Each record represents a product return initiated by a customer. Use to calculate return rates and identify return drivers.',
+    grain: 'One row per return event',
+    usedInDatasetIds: [],
+    fields: [
+      { key: 'return_id',   label: 'return_id',   type: '#',  isKey: true, role: 'ID',        visible: true,  semanticDesc: 'Unique identifier per return record.' },
+      { key: 'order_id',    label: 'order_id',    type: '#',  role: 'DIMENSION', visible: true,  semanticDesc: 'Links the return to its originating order.' },
+      { key: 'customer_id', label: 'customer_id', type: '#',  role: 'DIMENSION', visible: true,  semanticDesc: 'Links the return to the customer who initiated it.' },
+      { key: 'return_date', label: 'return_date', type: 'dt', role: 'DIMENSION', visible: true,  semanticDesc: 'Date the return was initiated.' },
+      { key: 'reason',      label: 'reason',      type: 'Aa', role: 'DIMENSION', visible: true,  semanticDesc: 'Customer-stated reason for the return.' },
+    ],
+  },
+  {
+    id: 'contacts', name: 'Contacts', sourceId: 'hubspot', sourceName: 'HubSpot',
+    description: 'Each record represents a marketing contact in HubSpot. Use to connect marketing activity to pipeline and revenue outcomes.',
+    grain: 'One row per HubSpot contact',
+    usedInDatasetIds: ['marketing-attribution'],
+    fields: [
+      { key: 'contact_id',  label: 'contact_id',  type: '#',  isKey: true, role: 'ID',        visible: true,  semanticDesc: 'Primary key for the HubSpot contacts table.' },
+      { key: 'email',       label: 'email',        type: 'Aa', role: 'DIMENSION', visible: true,  semanticDesc: 'Contact email address. Use as the join key to match with order or deal records.' },
+      { key: 'lifecycle',   label: 'lifecycle',    type: 'Aa', role: 'DIMENSION', visible: true,  semanticDesc: 'HubSpot lifecycle stage (e.g. Lead, MQL, SQL, Customer).' },
+      { key: 'source',      label: 'source',       type: 'Aa', role: 'DIMENSION', visible: true,  semanticDesc: 'Original acquisition source (e.g. Organic, Paid, Referral).' },
+      { key: 'created_at',  label: 'created_at',   type: 'dt', role: 'DIMENSION', visible: false, semanticDesc: 'Timestamp when the contact was created in HubSpot.' },
+    ],
+  },
+];
+
+// ── Datasets (join & execution layer — multiple Data Models combined) ─────────
+const DATASETS_INITIAL = {
   draft: [
-    { id: 'customer-ltv', name: 'Customer LTV', desc: 'Lifetime value across orders and subscription events', entities: 2, joins: 1, uses: 0, stage: 'draft', progress: 0 },
-    { id: 'marketing-attribution', name: 'Marketing attribution', desc: 'Campaign spend linked to converted deals via UTM source', entities: 3, joins: 2, uses: 4, stage: 'draft', progress: 1 },
+    { id: 'customer-ltv', name: 'Customer LTV', desc: 'Lifetime value across orders and subscription events', entities: 2, joins: 1, uses: 0, stage: 'draft', progress: 0, modelIds: ['orders', 'customers'] },
+    { id: 'marketing-attribution', name: 'Marketing attribution', desc: 'Campaign spend linked to converted deals via UTM source', entities: 3, joins: 2, uses: 4, stage: 'draft', progress: 1, modelIds: ['contacts'] },
   ],
   dev: [
-    { id: 'sales-overview', name: 'Sales overview', desc: 'Orders joined with customers and products for sales exploration', entities: 3, joins: 2, uses: 12, stage: 'dev', progress: 6 },
-    { id: 'support-tickets', name: 'Support tickets', desc: 'Zendesk tickets linked to accounts for CSAT analysis', entities: 2, joins: 1, uses: 23, stage: 'dev', progress: 11 },
+    { id: 'sales-overview', name: 'Sales overview', desc: 'Orders joined with customers and products for sales exploration', entities: 3, joins: 2, uses: 12, stage: 'dev', progress: 6, modelIds: ['orders', 'customers', 'products'] },
+    { id: 'support-tickets', name: 'Support tickets', desc: 'Zendesk tickets linked to accounts for CSAT analysis', entities: 2, joins: 1, uses: 23, stage: 'dev', progress: 11, modelIds: [] },
   ],
   production: [
-    { id: 'revenue-summary', name: 'Revenue summary', desc: 'Aggregated revenue model used across all executive dashboards', entities: 4, joins: 3, uses: 847, stage: 'production', progress: 100 },
-    { id: 'headcount-roles', name: 'Headcount & roles', desc: 'HRIS data combined with org chart hierarchy for people analytics', entities: 3, joins: 2, uses: 234, stage: 'production', progress: 28 },
+    { id: 'revenue-summary', name: 'Revenue summary', desc: 'Aggregated revenue model used across all executive dashboards', entities: 4, joins: 3, uses: 847, stage: 'production', progress: 100, modelIds: ['orders', 'products'] },
+    { id: 'headcount-roles', name: 'Headcount & roles', desc: 'HRIS data combined with org chart hierarchy for people analytics', entities: 3, joins: 2, uses: 234, stage: 'production', progress: 28, modelIds: [] },
   ],
+};
+
+// ── Metrics ──────────────────────────────────────────────────────────────────
+const METRICS_INITIAL = [
+  { id: 'total-revenue',  name: 'Total Revenue',         description: 'Sum of gross order revenue across all orders in the dataset.', datasetId: 'sales-overview',  expression: 'SUM(amount)',              aggregation: 'SUM', isGlobal: false },
+  { id: 'net-revenue',    name: 'Net Revenue',           description: 'Sum of revenue after deducting discounts and unit cost.',      datasetId: 'sales-overview',  expression: 'SUM(revenue_net)',         aggregation: 'SUM', isGlobal: false },
+  { id: 'aov',            name: 'Average Order Value',   description: 'Average gross revenue per order. Divide total revenue by distinct order count.', datasetId: 'sales-overview', expression: 'SUM(amount) / COUNT(DISTINCT order_id)', aggregation: 'DERIVED', isGlobal: false },
+  { id: 'return-rate',    name: 'Return Rate',           description: 'Percentage of orders that resulted in a return.',             datasetId: 'revenue-summary', expression: 'COUNT(return_id) / COUNT(DISTINCT order_id)', aggregation: 'DERIVED', isGlobal: false },
+];
+
+// Legacy alias — keeps the existing editor/inspect view working unchanged
+const MODELS = {
+  draft:      DATASETS_INITIAL.draft,
+  dev:        DATASETS_INITIAL.dev,
+  production: DATASETS_INITIAL.production,
 };
 
 const INITIAL_ENTITIES = [
@@ -84,6 +226,8 @@ const PREVIEW_ROWS = [
 const JOIN_MAP = { INNER: 'INNER JOIN', LEFT: 'LEFT JOIN', RIGHT: 'RIGHT JOIN', FULL: 'FULL OUTER JOIN', LEFT_EXCL: 'LEFT JOIN', RIGHT_EXCL: 'RIGHT JOIN' };
 
 const ActiveFieldContext = createContext(null);
+// Shared context for dataset canvas field popovers — one open at a time.
+const DsActiveFieldContext = createContext(null);
 
 const DBT_TYPE_MAP = { '#': 'integer', '$': 'numeric', 'Aa': 'varchar', 'dt': 'timestamp', 'fx': 'numeric' };
 const DBT_AGG_MAP = { SUM: 'sum', AVG: 'average', COUNT: 'count', MIN: 'min', MAX: 'max' };
@@ -134,6 +278,300 @@ const FORMULA_FUNCTIONS = [
 
 const FORMULA_FN_SET = new Set(FORMULA_FUNCTIONS.map((f) => f.name));
 const FORMULA_KEYWORDS = new Set(['AND','OR','NOT','THEN','ELSE','END','WHEN','AS','IN','BETWEEN','NULL','TRUE','FALSE']);
+
+// ── Connection config schema ────────────────────────────────────────────────
+// Each schema has tabs: connection, auth, advanced. Each tab is an array of field defs.
+// field: { key, label, type: 'text'|'password'|'number'|'select'|'toggle'|'oauth'|'textarea', placeholder?, options?, hint? }
+const CONNECTOR_CONFIG_SCHEMA = {
+  sql: {
+    connection: [
+      { key: 'host',     label: 'Host',     type: 'text',   placeholder: 'e.g. db.example.com or 10.0.0.1' },
+      { key: 'port',     label: 'Port',     type: 'number', placeholder: '5432' },
+      { key: 'database', label: 'Database', type: 'text',   placeholder: 'my_database' },
+      { key: 'schema',   label: 'Schema',   type: 'text',   placeholder: 'public' },
+    ],
+    auth: [
+      { key: 'username', label: 'Username', type: 'text',     placeholder: 'db_user' },
+      { key: 'password', label: 'Password', type: 'password', placeholder: '••••••••' },
+    ],
+    advanced: [
+      { key: 'ssl',     label: 'Require SSL',       type: 'toggle' },
+      { key: 'timeout', label: 'Connection Timeout', type: 'number', placeholder: '30', hint: 'seconds' },
+    ],
+  },
+  mysql: {
+    connection: [
+      { key: 'host',     label: 'Host',     type: 'text',   placeholder: 'e.g. db.example.com' },
+      { key: 'port',     label: 'Port',     type: 'number', placeholder: '3306' },
+      { key: 'database', label: 'Database', type: 'text',   placeholder: 'my_database' },
+    ],
+    auth: [
+      { key: 'username', label: 'Username', type: 'text',     placeholder: 'db_user' },
+      { key: 'password', label: 'Password', type: 'password', placeholder: '••••••••' },
+    ],
+    advanced: [
+      { key: 'ssl',     label: 'Require SSL',       type: 'toggle' },
+      { key: 'timeout', label: 'Connection Timeout', type: 'number', placeholder: '30', hint: 'seconds' },
+      { key: 'charset', label: 'Charset',            type: 'text',   placeholder: 'utf8mb4' },
+    ],
+  },
+  mssql: {
+    connection: [
+      { key: 'host',     label: 'Server',   type: 'text',   placeholder: 'e.g. sqlserver.company.com\\INSTANCE' },
+      { key: 'port',     label: 'Port',     type: 'number', placeholder: '1433' },
+      { key: 'database', label: 'Database', type: 'text',   placeholder: 'Northwind' },
+      { key: 'schema',   label: 'Schema',   type: 'text',   placeholder: 'dbo' },
+    ],
+    auth: [
+      { key: 'authType', label: 'Auth Type', type: 'select', options: ['SQL Server Auth', 'Windows Auth', 'Azure AD'] },
+      { key: 'username', label: 'Username',  type: 'text',     placeholder: 'sa' },
+      { key: 'password', label: 'Password',  type: 'password', placeholder: '••••••••' },
+    ],
+    advanced: [
+      { key: 'encrypt',  label: 'Encrypt Connection', type: 'toggle' },
+      { key: 'timeout',  label: 'Connection Timeout',  type: 'number', placeholder: '30', hint: 'seconds' },
+    ],
+  },
+  snowflake: {
+    connection: [
+      { key: 'account',   label: 'Account',    type: 'text', placeholder: 'xy12345.us-east-1' },
+      { key: 'warehouse', label: 'Warehouse',  type: 'text', placeholder: 'COMPUTE_WH' },
+      { key: 'database',  label: 'Database',   type: 'text', placeholder: 'ANALYTICS' },
+      { key: 'schema',    label: 'Schema',     type: 'text', placeholder: 'PUBLIC' },
+      { key: 'role',      label: 'Default Role', type: 'text', placeholder: 'ANALYST' },
+    ],
+    auth: [
+      { key: 'authType', label: 'Auth Type', type: 'select', options: ['Username / Password', 'Key Pair', 'OAuth'] },
+      { key: 'username', label: 'Username',  type: 'text',     placeholder: 'SNOWFLAKE_USER' },
+      { key: 'password', label: 'Password',  type: 'password', placeholder: '••••••••' },
+    ],
+    advanced: [
+      { key: 'timeout', label: 'Login Timeout',   type: 'number', placeholder: '60', hint: 'seconds' },
+      { key: 'loginTimeout', label: 'Query Timeout', type: 'number', placeholder: '300', hint: 'seconds' },
+    ],
+  },
+  oracle: {
+    connection: [
+      { key: 'host',        label: 'Host',         type: 'text',   placeholder: 'oracle.example.com' },
+      { key: 'port',        label: 'Port',         type: 'number', placeholder: '1521' },
+      { key: 'serviceName', label: 'Service Name', type: 'text',   placeholder: 'ORCL' },
+    ],
+    auth: [
+      { key: 'username', label: 'Username', type: 'text',     placeholder: 'system' },
+      { key: 'password', label: 'Password', type: 'password', placeholder: '••••••••' },
+    ],
+    advanced: [
+      { key: 'ssl',     label: 'Use SSL/TLS',        type: 'toggle' },
+      { key: 'timeout', label: 'Connection Timeout', type: 'number', placeholder: '30', hint: 'seconds' },
+    ],
+  },
+  bigquery: {
+    connection: [
+      { key: 'projectId', label: 'Project ID',     type: 'text', placeholder: 'my-gcp-project' },
+      { key: 'dataset',   label: 'Default Dataset', type: 'text', placeholder: 'analytics' },
+      { key: 'location',  label: 'Location',        type: 'select', options: ['US', 'EU', 'us-central1', 'europe-west1', 'asia-east1'] },
+    ],
+    auth: [
+      { key: 'authType', label: 'Auth Type', type: 'select', options: ['Service Account JSON', 'OAuth (User Account)'] },
+      { key: 'keyJson',  label: 'Service Account JSON', type: 'textarea', placeholder: 'Paste JSON key file contents…' },
+    ],
+    advanced: [
+      { key: 'maxBillingBytes', label: 'Max Bytes Billed', type: 'number', placeholder: '1073741824', hint: 'bytes' },
+      { key: 'timeout',         label: 'Query Timeout',    type: 'number', placeholder: '300',        hint: 'seconds' },
+    ],
+  },
+  redshift: {
+    connection: [
+      { key: 'host',     label: 'Cluster Endpoint', type: 'text',   placeholder: 'cluster.abc123.us-east-1.redshift.amazonaws.com' },
+      { key: 'port',     label: 'Port',             type: 'number', placeholder: '5439' },
+      { key: 'database', label: 'Database',         type: 'text',   placeholder: 'dev' },
+      { key: 'schema',   label: 'Schema',           type: 'text',   placeholder: 'public' },
+    ],
+    auth: [
+      { key: 'authType', label: 'Auth Type', type: 'select', options: ['Database Credentials', 'IAM Role'] },
+      { key: 'username', label: 'Username',  type: 'text',     placeholder: 'awsuser' },
+      { key: 'password', label: 'Password',  type: 'password', placeholder: '••••••••' },
+    ],
+    advanced: [
+      { key: 'ssl',     label: 'Require SSL',       type: 'toggle' },
+      { key: 'timeout', label: 'Connection Timeout', type: 'number', placeholder: '30', hint: 'seconds' },
+    ],
+  },
+  databricks: {
+    connection: [
+      { key: 'serverHostname', label: 'Server Hostname', type: 'text', placeholder: 'adb-xxx.azuredatabricks.net' },
+      { key: 'httpPath',       label: 'HTTP Path',       type: 'text', placeholder: '/sql/1.0/warehouses/abc123' },
+      { key: 'catalog',        label: 'Catalog',         type: 'text', placeholder: 'main' },
+      { key: 'schema',         label: 'Schema',          type: 'text', placeholder: 'default' },
+    ],
+    auth: [
+      { key: 'token', label: 'Personal Access Token', type: 'password', placeholder: 'dapi••••••••' },
+    ],
+    advanced: [
+      { key: 'timeout', label: 'Connection Timeout', type: 'number', placeholder: '60', hint: 'seconds' },
+    ],
+  },
+  athena: {
+    connection: [
+      { key: 'region',          label: 'AWS Region',        type: 'select', options: ['us-east-1','us-east-2','us-west-1','us-west-2','eu-west-1','ap-southeast-1'] },
+      { key: 'workgroup',       label: 'Workgroup',          type: 'text',   placeholder: 'primary' },
+      { key: 'outputBucket',    label: 'Output S3 Bucket',   type: 'text',   placeholder: 's3://my-athena-results/' },
+      { key: 'catalog',         label: 'Catalog',            type: 'text',   placeholder: 'AwsDataCatalog' },
+    ],
+    auth: [
+      { key: 'authType',  label: 'Auth Type',       type: 'select', options: ['Access Key', 'IAM Role'] },
+      { key: 'accessKey', label: 'Access Key ID',   type: 'text',     placeholder: 'AKIAIOSFODNN7EXAMPLE' },
+      { key: 'secretKey', label: 'Secret Access Key', type: 'password', placeholder: '••••••••' },
+    ],
+    advanced: [
+      { key: 'timeout', label: 'Query Timeout', type: 'number', placeholder: '300', hint: 'seconds' },
+    ],
+  },
+  synapse: {
+    connection: [
+      { key: 'host',     label: 'Server',     type: 'text',   placeholder: 'workspace.sql.azuresynapse.net' },
+      { key: 'port',     label: 'Port',       type: 'number', placeholder: '1433' },
+      { key: 'database', label: 'Database',   type: 'text',   placeholder: 'mypool' },
+      { key: 'schema',   label: 'Schema',     type: 'text',   placeholder: 'dbo' },
+    ],
+    auth: [
+      { key: 'authType', label: 'Auth Type', type: 'select', options: ['SQL Auth', 'Azure AD'] },
+      { key: 'username', label: 'Username',  type: 'text',     placeholder: 'sqladminuser' },
+      { key: 'password', label: 'Password',  type: 'password', placeholder: '••••••••' },
+    ],
+    advanced: [
+      { key: 'encrypt',  label: 'Encrypt Connection', type: 'toggle' },
+      { key: 'timeout',  label: 'Connection Timeout',  type: 'number', placeholder: '30', hint: 'seconds' },
+    ],
+  },
+  elasticsearch: {
+    connection: [
+      { key: 'url',   label: 'Cluster URL', type: 'text', placeholder: 'https://my-cluster.es.io:9243' },
+      { key: 'index', label: 'Index',       type: 'text', placeholder: 'my-index-*' },
+    ],
+    auth: [
+      { key: 'authType', label: 'Auth Type', type: 'select', options: ['API Key', 'Basic Auth', 'None'] },
+      { key: 'apiKey',   label: 'API Key',   type: 'password', placeholder: '••••••••' },
+    ],
+    advanced: [
+      { key: 'timeout', label: 'Request Timeout', type: 'number', placeholder: '30', hint: 'seconds' },
+    ],
+  },
+  google_oauth: {
+    connection: [
+      { key: 'accountId',  label: 'Account ID',   type: 'text', placeholder: 'Auto-filled after OAuth' },
+      { key: 'propertyId', label: 'Property / View ID', type: 'text', placeholder: 'Auto-filled after OAuth' },
+    ],
+    auth: [
+      { key: '_oauth', label: 'Google Account', type: 'oauth', hint: 'Sign in with your Google account to authorise access.' },
+    ],
+    advanced: [
+      { key: 'dateRange', label: 'Default Date Range', type: 'select', options: ['Last 30 days', 'Last 90 days', 'Last 12 months', 'Custom'] },
+    ],
+  },
+  crm_oauth: {
+    connection: [
+      { key: 'instanceUrl', label: 'Instance URL', type: 'text', placeholder: 'https://yourorg.my.salesforce.com' },
+    ],
+    auth: [
+      { key: '_oauth', label: 'OAuth Sign-in', type: 'oauth', hint: 'Authorise Reveal to access your CRM account.' },
+    ],
+    advanced: [
+      { key: 'apiVersion', label: 'API Version', type: 'text', placeholder: 'v58.0' },
+      { key: 'timeout',    label: 'Timeout',     type: 'number', placeholder: '30', hint: 'seconds' },
+    ],
+  },
+  crm_apikey: {
+    connection: [
+      { key: 'portalId', label: 'Portal / Account ID', type: 'text', placeholder: 'e.g. 12345678' },
+    ],
+    auth: [
+      { key: 'apiKey',  label: 'API Key',  type: 'password', placeholder: '••••••••' },
+    ],
+    advanced: [
+      { key: 'timeout', label: 'Timeout', type: 'number', placeholder: '30', hint: 'seconds' },
+    ],
+  },
+  rest: {
+    connection: [
+      { key: 'url',     label: 'Base URL', type: 'text',   placeholder: 'https://api.example.com/v1' },
+      { key: 'method',  label: 'Method',   type: 'select', options: ['GET', 'POST'] },
+    ],
+    auth: [
+      { key: 'authType', label: 'Auth Type', type: 'select', options: ['None', 'Bearer Token', 'Basic Auth', 'API Key Header'] },
+      { key: 'token',    label: 'Token / Key', type: 'password', placeholder: '••••••••' },
+    ],
+    advanced: [
+      { key: 'headers', label: 'Custom Headers', type: 'textarea', placeholder: 'Content-Type: application/json\nX-Custom: value' },
+      { key: 'timeout', label: 'Timeout',         type: 'number',   placeholder: '30', hint: 'seconds' },
+    ],
+  },
+  files: {
+    connection: [
+      { key: 'url',      label: 'File URL',    type: 'text',   placeholder: 'https://files.example.com/data.csv' },
+      { key: 'fileType', label: 'File Type',   type: 'select', options: ['CSV', 'TSV', 'Excel (XLS)', 'Excel (XLSX)', 'JSON'] },
+    ],
+    auth: [
+      { key: 'authType', label: 'Auth Type', type: 'select', options: ['None', 'Basic Auth'] },
+      { key: 'username', label: 'Username',  type: 'text',     placeholder: 'optional' },
+      { key: 'password', label: 'Password',  type: 'password', placeholder: '••••••••' },
+    ],
+    advanced: [],
+  },
+  sharepoint: {
+    connection: [
+      { key: 'siteUrl', label: 'SharePoint Site URL', type: 'text', placeholder: 'https://contoso.sharepoint.com/sites/MyTeam' },
+    ],
+    auth: [
+      { key: '_oauth', label: 'Microsoft Account', type: 'oauth', hint: 'Sign in with your Microsoft 365 account.' },
+    ],
+    advanced: [
+      { key: 'library', label: 'Document Library', type: 'text', placeholder: 'Shared Documents' },
+    ],
+  },
+};
+
+// Schema key lookup per connector id
+const CONNECTOR_SCHEMA_MAP = {
+  'sales-db':          'sql',
+  'product-db':        'mysql',
+  'azure-sql':         'mssql',
+  'azure-ssas':        'mssql',
+  'mariadb':           'mysql',
+  'microsoft-sql':     'mssql',
+  'mysql':             'mysql',
+  'oracle':            'oracle',
+  'postgresql':        'sql',
+  'snowflake':         'snowflake',
+  'sybase':            'mssql',
+  'google-analytics':  'google_oauth',
+  'google-ads':        'google_oauth',
+  'google-search':     'google_oauth',
+  'google-bigquery':   'bigquery',
+  'hubspot':           'crm_apikey',
+  'salesforce':        'crm_oauth',
+  'ms-dynamics':       'crm_oauth',
+  'marketing-cloud':   'crm_oauth',
+  'marketo':           'crm_apikey',
+  'netsuite':          'crm_oauth',
+  'quickbooks-desktop':'crm_apikey',
+  'quickbooks-online': 'crm_oauth',
+  'amazon-athena':     'athena',
+  'amazon-redshift':   'redshift',
+  'azure-synapse':     'synapse',
+  'databricks':        'databricks',
+  'elasticsearch':     'elasticsearch',
+  'odata-feed':        'rest',
+  'rest-api':          'rest',
+  'web-resource':      'rest',
+  'data-files':        'files',
+  'sharepoint':        'sharepoint',
+  'facebook':          'crm_oauth',
+  'facebook-ads':      'crm_oauth',
+  'instagram':         'crm_oauth',
+  'linkedin':          'crm_oauth',
+  'linkedin-ads':      'crm_oauth',
+};
 
 const CONNECTOR_CATEGORIES = [
   {
@@ -276,15 +714,6 @@ const CAT_COLORS = {
 const ITEM_CATEGORY_MAP = Object.fromEntries(
   CONNECTOR_CATEGORIES.flatMap((cat) => cat.items.map((item) => [item.id, cat.category]))
 );
-
-const CATEGORY_LABELS = {
-  'Files': 'Files',
-  'Databases': 'Databases',
-  'Marketing, Sales and CRMs': 'Marketing & Sales',
-  'Big Data Storages': 'Big Data',
-  'From the web': 'Web',
-  'Social Media': 'Social Media',
-};
 
 function connectorAbbr(name) {
   const words = name.split(' ');
@@ -712,10 +1141,19 @@ function FieldPopupLayer({
 }
 
 // ── Calculated field modal ────────────────────────────────────────────────
-function CalcFieldModal({ isOpen, onClose, onSave, availableFields }) {
+function CalcFieldModal({ isOpen, onClose, onSave, availableFields, editField }) {
   const [fieldName, setFieldName] = useState('');
   const [formula, setFormula] = useState('');
   const [agg, setAgg] = useState('SUM');
+
+  // Sync state when editField changes (open for editing)
+  useEffect(() => {
+    if (isOpen) {
+      setFieldName(editField?.label || '');
+      setFormula(editField?.formula || '');
+      setAgg(editField?.agg || 'SUM');
+    }
+  }, [isOpen, editField]);
 
   const resetState = () => { setFieldName(''); setFormula(''); setAgg('SUM'); };
 
@@ -726,6 +1164,7 @@ function CalcFieldModal({ isOpen, onClose, onSave, availableFields }) {
   };
 
   const handleClose = () => { onClose(); resetState(); };
+  const isEditing = !!editField;
 
   return (
     <Dialog.Root open={isOpen} onOpenChange={(open) => { if (!open) handleClose(); }}>
@@ -734,7 +1173,7 @@ function CalcFieldModal({ isOpen, onClose, onSave, availableFields }) {
         <Dialog.Viewport className="dialog-viewport">
           <Dialog.Popup className="dialog-popup calc-field-modal">
             <div className="calc-field-header">
-              <Dialog.Title className="modal-title">Add calculated field</Dialog.Title>
+              <Dialog.Title className="modal-title">{isEditing ? 'Edit calculated field' : 'Add calculated field'}</Dialog.Title>
               <Dialog.Close className="plain-btn canvas-popup-close">×</Dialog.Close>
             </div>
             <div className="calc-field-body">
@@ -812,24 +1251,25 @@ function JoinEdge({
   });
   const {
     isActive, onSelect, joinType, joinHighlight,
-    fromEntity, toEntity, fromChoices, toChoices, from, to, desc,
+    fromEntity, toEntity, fromChoices, toChoices, from, to, desc, cardinality,
     onUpdateJoin, hoveredJoinType, setHoveredJoinType, onClose,
+    isReadOnly, onEdit,
   } = data;
   const [,, zoom] = useStore((s) => s.transform);
 
   return (
     <>
-      <path id={id} className="react-flow__edge-path join-edge-path" d={edgePath} />
+      <path id={id} className={`react-flow__edge-path join-edge-path${isReadOnly ? ' join-edge-ro' : ''}`} d={edgePath} />
       <EdgeLabelRenderer>
         <button
-          className={`jnode nodrag nopan ${isActive ? 'active' : ''}`}
+          className={`jnode nodrag nopan${isActive ? ' active' : ''}${isReadOnly ? ' jnode-ro' : ''}`}
           style={{
             position: 'absolute',
             transform: `translate(${labelX}px,${labelY}px) scale(${1 / zoom}) translate(-50%,-50%)`,
             pointerEvents: 'all',
           }}
           onClick={onSelect}
-          aria-label={`Edit join between ${fromEntity} and ${toEntity}`}
+          aria-label={`${isReadOnly ? 'View' : 'Edit'} join between ${fromEntity} and ${toEntity}`}
         >
           <JoinTypeGlyph className="jnode-glyph" highlight={joinHighlight || 'intersection'} />
         </button>
@@ -850,56 +1290,107 @@ function JoinEdge({
               </div>
               <button className="plain-btn canvas-popup-close" onClick={onClose}>×</button>
             </header>
-            <div className="canvas-popup-body">
-              <section className="sp-section">
-                <p className="sp-lbl">Join type</p>
-                <div className="join-type-grid" role="radiogroup" aria-label="Join type selector">
-                  {JOIN_TYPES.map((item) => {
-                    const selected = joinType === item.value;
-                    return (
+            {isReadOnly ? (
+              <div className="canvas-popup-body">
+                <section className="sp-section join-ro-section">
+                  <div className="join-ro-type-row">
+                    <JoinTypeGlyph highlight={joinHighlight || 'intersection'} />
+                    <div>
+                      <div className="join-ro-type-name">{JOIN_TYPES.find((t) => t.value === joinType)?.label ?? joinType}</div>
+                      <div className="join-ro-type-sql">{JOIN_MAP[joinType]}</div>
+                    </div>
+                  </div>
+                  <p className="join-ro-implication">{JOIN_TYPES.find((t) => t.value === joinType)?.implication}</p>
+                </section>
+                <section className="sp-section join-ro-section">
+                  <p className="sp-lbl">Key mapping</p>
+                  <div className="join-ro-map">
+                    <code className="join-ro-key">{from}</code>
+                    <span className="join-arrow">→</span>
+                    <code className="join-ro-key">{to}</code>
+                  </div>
+                  {cardinality && (
+                    <div className="join-ro-cardinality">
+                      <span className="join-cardinality-tag">{cardinality}</span>
+                    </div>
+                  )}
+                </section>
+                {desc && (
+                  <section className="sp-section join-ro-section">
+                    <p className="sp-lbl">Description</p>
+                    <p className="join-ro-desc">{desc}</p>
+                  </section>
+                )}
+                <div className="join-ro-edit-notice">
+                  <span>Read only</span>
+                  <button className="btn btn-sm" onClick={() => { onClose(); onEdit(); }}>Edit dataset</button>
+                </div>
+              </div>
+            ) : (
+              <div className="canvas-popup-body">
+                <section className="sp-section">
+                  <p className="sp-lbl">Join type</p>
+                  <div className="join-type-grid" role="radiogroup" aria-label="Join type selector">
+                    {JOIN_TYPES.map((item) => {
+                      const selected = joinType === item.value;
+                      return (
+                        <button
+                          key={item.value}
+                          type="button"
+                          className={`join-type-card ${selected ? 'selected' : ''}`}
+                          role="radio"
+                          aria-checked={selected}
+                          onClick={() => onUpdateJoin(id, 'type', item.value)}
+                          onMouseEnter={() => setHoveredJoinType(item.value)}
+                          onMouseLeave={() => setHoveredJoinType(null)}
+                          title={item.implication}
+                        >
+                          <JoinTypeGlyph highlight={item.highlight} />
+                          <span className="join-type-name">{item.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {(() => {
+                    const meta = JOIN_TYPES.find((i) => i.value === (hoveredJoinType || joinType));
+                    return meta ? (
+                      <div className="join-type-hint"><strong>{meta.label}</strong><p>{meta.implication}</p></div>
+                    ) : null;
+                  })()}
+                </section>
+                <section className="sp-section">
+                  <p className="sp-lbl">Key mapping</p>
+                  <div className="join-map-row">
+                    <Select.Root value={from} onValueChange={(v) => onUpdateJoin(id, 'from', v)} items={fromChoices}>
+                      <Select.Trigger className="bu-trigger"><Select.Value /><Select.Icon className="bu-icon">▾</Select.Icon></Select.Trigger>
+                      <Select.Portal><Select.Positioner><Select.Popup className="bu-popup"><Select.List>{fromChoices.map((c) => (<Select.Item key={c} value={c} className="bu-item"><Select.ItemText>{c}</Select.ItemText></Select.Item>))}</Select.List></Select.Popup></Select.Positioner></Select.Portal>
+                    </Select.Root>
+                    <span className="join-arrow">→</span>
+                    <Select.Root value={to} onValueChange={(v) => onUpdateJoin(id, 'to', v)} items={toChoices}>
+                      <Select.Trigger className="bu-trigger"><Select.Value /><Select.Icon className="bu-icon">▾</Select.Icon></Select.Trigger>
+                      <Select.Portal><Select.Positioner><Select.Popup className="bu-popup"><Select.List>{toChoices.map((c) => (<Select.Item key={c} value={c} className="bu-item"><Select.ItemText>{c}</Select.ItemText></Select.Item>))}</Select.List></Select.Popup></Select.Positioner></Select.Portal>
+                    </Select.Root>
+                  </div>
+                </section>
+                <section className="sp-section">
+                  <p className="sp-lbl">Description</p>
+                  <textarea className="fi-ta" value={desc} onChange={(e) => onUpdateJoin(id, 'desc', e.target.value)} />
+                </section>
+                <section className="sp-section">
+                  <p className="sp-lbl">Cardinality</p>
+                  <div className="join-cardinality-row">
+                    {['one-to-one','many-to-one','one-to-many','many-to-many'].map((c) => (
                       <button
-                        key={item.value}
+                        key={c}
                         type="button"
-                        className={`join-type-card ${selected ? 'selected' : ''}`}
-                        role="radio"
-                        aria-checked={selected}
-                        onClick={() => onUpdateJoin(id, 'type', item.value)}
-                        onMouseEnter={() => setHoveredJoinType(item.value)}
-                        onMouseLeave={() => setHoveredJoinType(null)}
-                        title={item.implication}
-                      >
-                        <JoinTypeGlyph highlight={item.highlight} />
-                        <span className="join-type-name">{item.label}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-                {(() => {
-                  const meta = JOIN_TYPES.find((i) => i.value === (hoveredJoinType || joinType));
-                  return meta ? (
-                    <div className="join-type-hint"><strong>{meta.label}</strong><p>{meta.implication}</p></div>
-                  ) : null;
-                })()}
-              </section>
-              <section className="sp-section">
-                <p className="sp-lbl">Key mapping</p>
-                <div className="join-map-row">
-                  <Select.Root value={from} onValueChange={(v) => onUpdateJoin(id, 'from', v)} items={fromChoices}>
-                    <Select.Trigger className="bu-trigger"><Select.Value /><Select.Icon className="bu-icon">▾</Select.Icon></Select.Trigger>
-                    <Select.Portal><Select.Positioner><Select.Popup className="bu-popup"><Select.List>{fromChoices.map((c) => (<Select.Item key={c} value={c} className="bu-item"><Select.ItemText>{c}</Select.ItemText></Select.Item>))}</Select.List></Select.Popup></Select.Positioner></Select.Portal>
-                  </Select.Root>
-                  <span className="join-arrow">→</span>
-                  <Select.Root value={to} onValueChange={(v) => onUpdateJoin(id, 'to', v)} items={toChoices}>
-                    <Select.Trigger className="bu-trigger"><Select.Value /><Select.Icon className="bu-icon">▾</Select.Icon></Select.Trigger>
-                    <Select.Portal><Select.Positioner><Select.Popup className="bu-popup"><Select.List>{toChoices.map((c) => (<Select.Item key={c} value={c} className="bu-item"><Select.ItemText>{c}</Select.ItemText></Select.Item>))}</Select.List></Select.Popup></Select.Positioner></Select.Portal>
-                  </Select.Root>
-                </div>
-              </section>
-              <section className="sp-section">
-                <p className="sp-lbl">Description</p>
-                <textarea className="fi-ta" value={desc} onChange={(e) => onUpdateJoin(id, 'desc', e.target.value)} />
-              </section>
-            </div>
+                        className={`join-cardinality-btn${(cardinality || 'many-to-one') === c ? ' selected' : ''}`}
+                        onClick={() => onUpdateJoin(id, 'cardinality', c)}
+                      >{c}</button>
+                    ))}
+                  </div>
+                </section>
+              </div>
+            )}
           </div>
         )}
       </EdgeLabelRenderer>
@@ -1128,9 +1619,1304 @@ function EditorCanvas({
   );
 }
 
+// ── Catalog left pane ─────────────────────────────────────────────────────────
+// ── Dataset Canvas right pane ─────────────────────────────────────────────
+// Read-only ReactFlow canvas scoped to a single dataset's modelIds.
+// Edit mode unlocks drag, connect, and add-model interactions.
+
+// Build a joins map from inferred key-field matches between entity pairs.
+function initJoinsFromEntities(entities) {
+  const joins = {};
+  for (let i = 0; i < entities.length; i++) {
+    for (let j = 0; j < entities.length; j++) {
+      if (i === j) continue;
+      const a = entities[i];
+      const b = entities[j];
+      const bPrimaryKeys = b.allFields.filter((f) => f.isKey).map((f) => f.key);
+      const matchingField = a.allFields.find((f) => bPrimaryKeys.includes(f.key) && !f.isKey);
+      const reverseExists = Object.values(joins).some(
+        (jn) => jn.fromEntity === b.id && jn.toEntity === a.id
+      );
+      if (matchingField && !reverseExists) {
+        const id = `join-${a.id}-${b.id}`;
+        joins[id] = {
+          id,
+          fromEntity: a.label,  // human-readable label for JoinEdge popup
+          toEntity: b.label,
+          fromEntityId: a.id,   // actual RF source/target ids
+          toEntityId: b.id,
+          type: 'LEFT',
+          from: matchingField.key,
+          to: matchingField.key,
+          desc: '',
+          fromChoices: a.allFields.map((f) => f.key),
+          toChoices: b.allFields.map((f) => f.key),
+        };
+      }
+    }
+  }
+  return joins;
+}
+
+// ── Dataset canvas field popover overlay ──────────────────────────────────
+// Rendered as a sibling to ReactFlow in ds-canvas-body so it escapes
+// each node's stacking context and can sit above all cards.
+function DsFieldPopoverLayer() {
+  const ctx = useContext(DsActiveFieldContext);
+  const [tx, ty, zoom] = useStore((s) => s.transform);
+  if (!ctx || !ctx.activeDsField) return null;
+
+  const { activeDsField, setActiveDsField, activeEntities, positions, onNavigateToModel } = ctx;
+  const entity = activeEntities.find((e) => e.id === activeDsField.nodeId);
+  const entityPos = positions[activeDsField.nodeId];
+  if (!entity || !entityPos) return null;
+
+  const allFields = entity.allFields || entity.fields;
+  const fieldMeta = allFields.find((f) => f.key === activeDsField.fieldKey);
+  if (!fieldMeta) return null;
+
+  const visFields = entity.fields;
+  const fieldIdx = visFields.findIndex((f) => f.key === activeDsField.fieldKey);
+
+  // Convert flow coords → screen-space pixels via RF viewport transform
+  const flowX = entityPos.x + ENTITY_CARD_WIDTH + 18;
+  const flowY = entityPos.y + ENTITY_HEADER_HEIGHT + Math.max(fieldIdx, 0) * ENTITY_ROW_HEIGHT + ENTITY_ROW_HEIGHT / 2;
+  const left = flowX * zoom + tx;
+  const top  = flowY * zoom + ty;
+
+  const displayName = fieldMeta.label || fieldMeta.key;
+  const fieldKey    = fieldMeta.key;
+  const role        = fieldMeta.role;
+  const desc        = fieldMeta.semanticDesc;
+  const synonyms    = (fieldMeta.synonyms || '').split(',').map((s) => s.trim()).filter(Boolean);
+
+  return (
+    <div
+      className="canvas-popup ds-fp-layer nodrag nopan"
+      style={{ position: 'absolute', left, top, transform: 'translateY(-50%)', pointerEvents: 'all', zIndex: 200 }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <span className="canvas-popup-arrow" />
+      <header className="canvas-popup-head ds-fp-head">
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="detail-title">{displayName}</div>
+          {displayName !== fieldKey && (
+            <div className="detail-sub ds-fp-key">{fieldKey}</div>
+          )}
+        </div>
+        <button className="plain-btn canvas-popup-close" onClick={() => setActiveDsField(null)}>×</button>
+      </header>
+      <div className="canvas-popup-body">
+        {role && (
+          <div className="ds-fp-pill-row">
+            <span className={`ds-field-badge ds-field-badge-${role.toLowerCase()}`}>
+              {ROLE_LABEL[role] ?? role}
+            </span>
+          </div>
+        )}
+        {synonyms.length > 0 && (
+          <div className="ds-fp-synonyms">
+            {synonyms.map((s) => <span key={s} className="synonym-tag">{s}</span>)}
+          </div>
+        )}
+        {desc && (
+          <section className="sp-section">
+            <p className="sp-lbl">Description</p>
+            <p className="ds-fp-desc">{desc}</p>
+          </section>
+        )}
+        {!desc && !role && synonyms.length === 0 && (
+          <p className="ds-fp-empty">No description added.</p>
+        )}
+      </div>
+      {onNavigateToModel && (
+        <div className="join-ro-edit-notice">
+          <span />
+          <button className="btn btn-sm" onClick={() => onNavigateToModel(activeDsField.nodeId)}>
+            Edit in Model
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ marginLeft: 5, flexShrink: 0 }} aria-hidden="true">
+              <path d="M5 12h14M12 5l7 7-7 7"/>
+            </svg>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DatasetInspectView({ entities, joins }) {
+  const joinList = Object.values(joins);
+  return (
+    <div className="ds-inspect-view">
+      <div className="insp-flex-row">
+        {entities.length > 0 && (
+          <div className="insp-section">
+            <h3 className="insp-section-hd" style={{ marginTop: 0 }}>Entities &amp; Fields</h3>
+            <div className="insp-cards-row">
+              {entities.map((entity) => {
+                const dimensionFields = entity.fields.filter((f) => f.role !== 'MEASURE');
+                const measureFields = entity.fields.filter((f) => f.role === 'MEASURE');
+                return (
+                  <article className="ent-block" key={entity.id}>
+                    <header className="ent-block-hd">
+                      <div className="ent-block-name-row">
+                        <span className="ent-block-name">
+                          {entity.label}
+                          {entity.source && <span className="ent-block-db"> ({entity.source})</span>}
+                        </span>
+                      </div>
+                    </header>
+                    {dimensionFields.length > 0 && (
+                      <section className="field-group">
+                        <h4 className="field-group-title dimensions">
+                          Dimensions <span className="field-group-count">{dimensionFields.length}</span>
+                        </h4>
+                        {dimensionFields.map((field) => {
+                          const synonymCount = field.synonyms ? field.synonyms.split(',').filter(s => s.trim()).length : 0;
+                          return (
+                            <div className="ifield ifield-compact" key={field.key} title={field.semanticDesc || undefined}>
+                              <span className="ifield-type-chip">{field.type}</span>
+                              <span className="ifield-name">{field.displayName || field.label}</span>
+                              {field.isKey && <span className="ifield-badge ifield-badge-key">key</span>}
+                              {synonymCount > 0 && <span className="ifield-alias-count">{synonymCount} alias{synonymCount !== 1 ? 'es' : ''}</span>}
+                            </div>
+                          );
+                        })}
+                      </section>
+                    )}
+                    {measureFields.length > 0 && (
+                      <section className="field-group">
+                        <h4 className="field-group-title measures">
+                          Measures <span className="field-group-count">{measureFields.length}</span>
+                        </h4>
+                        {measureFields.map((field) => (
+                          <div className="ifield ifield-compact" key={field.key} title={field.semanticDesc || undefined}>
+                            <span className="ifield-type-chip">{field.type}</span>
+                            <span className="ifield-name">{field.displayName || field.label}</span>
+                            {field.calc && <span className="ifield-badge ifield-badge-calc">computed</span>}
+                          </div>
+                        ))}
+                      </section>
+                    )}
+                    {entity.hiddenCount > 0 && (
+                      <div className="ent-block-hidden">{entity.hiddenCount} hidden field{entity.hiddenCount !== 1 ? 's' : ''}</div>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {joinList.length > 0 && (
+          <div className="insp-section">
+            <h3 className="insp-section-hd" style={{ marginTop: 0 }}>Relationships</h3>
+            <div className="insp-cards-row">
+              {joinList.map((join) => (
+                <article className="join-block" key={join.id}>
+                  <header className="join-block-hd">
+                    <span className="join-name">{join.fromEntity} → {join.toEntity}</span>
+                    {join.cardinality && (
+                      <span className="join-cardinality-tag">{join.cardinality}</span>
+                    )}
+                  </header>
+                  <div className="join-row">
+                    <p className="join-keys">
+                      {JOIN_TYPES.find((t) => t.value === join.type)?.label ?? join.type}
+                      {' · '}
+                      Match on <code className="mono">{join.from}</code> = <code className="mono">{join.to}</code>
+                    </p>
+                  </div>
+                  {join.desc && (
+                    <div className="join-row"><p className="join-desc">{join.desc}</p></div>
+                  )}
+                </article>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DatasetCanvasPaneInner({
+  dataset, dataModels, isEditing, editDraft, setEditDraft,
+  onEdit, onCancel, onSave, onOpenAddModel, onNavigateToModel,
+}) {
+  const { fitView } = useReactFlow();
+
+  // Active field popover state — shared across all nodes (one at a time)
+  const [activeDsField, setActiveDsField] = useState(null); // { nodeId, fieldKey } | null
+
+  // Build entity list from modelIds
+  const getEntities = useCallback((draft) => {
+    const ids = draft?.modelIds ?? dataset.modelIds ?? [];
+    return ids.map((mid) => {
+      const dm = dataModels.find((m) => m.id === mid);
+      if (!dm) return null;
+      const visFields = dm.fields.filter((f) => f.visible !== false);
+      return {
+        id: dm.id,
+        label: dm.name,
+        source: dm.sourceName,
+        sourceId: dm.sourceId,
+        allFields: dm.fields,
+        fields: visFields,
+        hiddenCount: dm.fields.length - visFields.length,
+      };
+    }).filter(Boolean);
+  }, [dataset.modelIds, dataModels]);
+
+  const activeEntities = isEditing ? getEntities(editDraft) : getEntities(null);
+
+  // Join state — inferred from entity key-field matches; type/keys are editable
+  const [joins, setJoins] = useState(() => initJoinsFromEntities(activeEntities));
+  const [activeJoin, setActiveJoin] = useState(null);
+  const [hoveredJoinType, setHoveredJoinType] = useState(null);
+
+  const updateJoin = useCallback((joinId, key, value) => {
+    setJoins((prev) => ({ ...prev, [joinId]: { ...prev[joinId], [key]: value } }));
+  }, []);
+
+  // JoinEdge-compatible edges built from joins state
+  const rfEdges = useMemo(() =>
+    Object.values(joins).map((j) => ({
+      id: j.id,
+      type: 'join',
+      source: j.fromEntityId,
+      target: j.toEntityId,
+      data: {
+        ...j,
+        joinType: j.type,
+        joinHighlight: JOIN_TYPES.find((t) => t.value === j.type)?.highlight,
+        isActive: activeJoin === j.id,
+        isReadOnly: !isEditing,
+        onEdit,
+        onSelect: () => setActiveJoin((prev) => prev === j.id ? null : j.id),
+        onUpdateJoin: updateJoin,
+        hoveredJoinType,
+        setHoveredJoinType,
+        onClose: () => setActiveJoin(null),
+      },
+    })),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [joins, activeJoin, hoveredJoinType]);
+
+  // Positions via Dagre — ranks nodes by join graph
+  const computePositions = useCallback((entities, joinMap) => {
+    if (entities.length === 0) return {};
+    const g = new Dagre.graphlib.Graph();
+    g.setGraph({ rankdir: 'LR', ranksep: 80, nodesep: 40 });
+    g.setDefaultEdgeLabel(() => ({}));
+    entities.forEach((e) => {
+      const h = ENTITY_HEADER_HEIGHT + e.fields.length * ENTITY_ROW_HEIGHT + ENTITY_FOOTER_HEIGHT;
+      g.setNode(e.id, { width: ENTITY_CARD_WIDTH, height: h });
+    });
+    Object.values(joinMap).forEach((j) => {
+      if (g.hasNode(j.fromEntityId) && g.hasNode(j.toEntityId)) {
+        g.setEdge(j.fromEntityId, j.toEntityId);
+      }
+    });
+    Dagre.layout(g);
+    const pos = {};
+    entities.forEach((e) => {
+      const node = g.node(e.id);
+      if (node) pos[e.id] = { x: node.x - ENTITY_CARD_WIDTH / 2, y: node.y };
+    });
+    return pos;
+  }, []);
+
+  const [positions, setPositions] = useState(() => computePositions(activeEntities, joins));
+
+  // When entity count changes: re-merge joins (preserve edited types), recompute layout
+  useEffect(() => {
+    const fresh = initJoinsFromEntities(activeEntities);
+    setJoins((prev) => {
+      const merged = {};
+      Object.values(fresh).forEach((j) => {
+        merged[j.id] = prev[j.id]
+          ? { ...j, type: prev[j.id].type, from: prev[j.id].from, to: prev[j.id].to, desc: prev[j.id].desc }
+          : j;
+      });
+      return merged;
+    });
+    const newPos = computePositions(activeEntities, fresh);
+    setPositions(newPos);
+    setTimeout(() => fitView({ padding: 0.18, duration: 300, maxZoom: 1 }), 80);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeEntities.length]);
+
+  const buildNodes = useCallback(() =>
+    activeEntities.map((e) => ({
+      id: e.id,
+      type: 'dsEntity',
+      position: positions[e.id] ?? { x: 100, y: 100 },
+      dragHandle: '.ec-hd',
+      data: {
+        ...e,
+        isEditing,
+        hiddenCount: e.hiddenCount,
+        onViewInModel: () => onNavigateToModel(e.id),
+        onRemove: isEditing ? () => {
+          setEditDraft((prev) => ({ ...prev, modelIds: (prev.modelIds ?? []).filter((id) => id !== e.id) }));
+        } : null,
+      },
+    })),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [activeEntities, positions, isEditing]);
+
+  const [rfNodes, setRfNodes, onNodesChange] = useNodesState(() => buildNodes());
+
+  useEffect(() => {
+    setRfNodes(buildNodes());
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeEntities.length, isEditing, positions]);
+
+  const onNodeDragStop = useCallback((_, node) => {
+    if (!isEditing) return;
+    setPositions((prev) => ({ ...prev, [node.id]: node.position }));
+  }, [isEditing]);
+
+  const onInit = useCallback((instance) => {
+    instance.fitView({ padding: 0.18, duration: 0, maxZoom: 1 });
+  }, []);
+
+  const stageBadgeClass = {
+    draft: 'badge-draft',
+    dev: 'badge-dev',
+    production: 'badge-prod',
+  }[dataset.stage] || 'badge-draft';
+
+  return (
+    <div className="ds-canvas-pane">
+      {/* Header */}
+      <div className="ds-canvas-header">
+        <div className="dm-header-left">
+          {isEditing ? (
+            <input
+              className="dm-name-input ds-name-input"
+              value={editDraft.name}
+              onChange={(e) => setEditDraft((p) => ({ ...p, name: e.target.value }))}
+              autoFocus
+            />
+          ) : (
+            <h2 className="dm-title">{dataset.name}</h2>
+          )}
+          <span className={`dm-source-label badge ${stageBadgeClass}`}>{dataset.stage}</span>
+        </div>
+        <div className="dm-header-actions">
+          {isEditing ? (
+            <>
+              <button className="btn" onClick={onCancel}>Cancel</button>
+              <button className="btn btn-primary" onClick={() => onSave(editDraft)}>Save</button>
+            </>
+          ) : (
+            <button className="btn btn-primary" onClick={onEdit}>Edit</button>
+          )}
+        </div>
+      </div>
+
+      {/* Description */}
+      {isEditing ? (
+        <textarea
+          className="dm-desc-ta ds-desc-ta"
+          value={editDraft.desc ?? ''}
+          onChange={(e) => setEditDraft((p) => ({ ...p, desc: e.target.value }))}
+          placeholder="Describe this dataset for AI and collaborators…"
+        />
+      ) : (
+        dataset.desc && <p className="dm-desc ds-desc">{dataset.desc}</p>
+      )}
+
+      {/* Unsaved-change banner (edit mode notice) */}
+      {isEditing && (
+        <div className="ds-edit-banner">
+          <span>Edit mode — changes are not saved until you click Save.</span>
+        </div>
+      )}
+
+      {/* Canvas (edit mode) / Inspect view (readonly) */}
+      {isEditing ? (
+        <>
+          <DsActiveFieldContext.Provider value={{ activeDsField, setActiveDsField, activeEntities, positions, onNavigateToModel }}>
+          <div className="ds-canvas-body">
+            <ReactFlow
+              nodes={rfNodes}
+              edges={rfEdges}
+              nodeTypes={dsNodeTypes}
+              edgeTypes={edgeTypes}
+              onNodesChange={onNodesChange}
+              onNodeDragStop={onNodeDragStop}
+              onPaneClick={() => { setActiveJoin(null); setActiveDsField(null); }}
+              nodesDraggable={isEditing}
+              nodesConnectable={false}
+              elementsSelectable={true}
+              panOnDrag
+              zoomOnScroll={false}
+              zoomOnPinch={false}
+              zoomOnDoubleClick={false}
+              preventScrolling={false}
+              proOptions={{ hideAttribution: true }}
+              onInit={onInit}
+              maxZoom={1}
+              minZoom={1}
+            >
+              <Background variant="dots" gap={20} size={1} color="rgba(0,0,0,0.1)" />
+            </ReactFlow>
+            <DsFieldPopoverLayer />
+            <div className="canvas-float-layer" aria-hidden="false">
+              <button className="float-btn float-left ds-add-model-btn" onClick={onOpenAddModel}>
+                + Add Data Model
+              </button>
+            </div>
+          </div>
+          </DsActiveFieldContext.Provider>
+          {activeEntities.length === 0 && (
+            <div className="ds-canvas-empty">
+              <div className="empty-state empty-state-canvas">
+                <div className="empty-state-icon">
+                  <svg width="44" height="44" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+                    <rect x="4" y="14" width="18" height="20" rx="3" stroke="currentColor" strokeWidth="2" fill="none"/>
+                    <rect x="26" y="14" width="18" height="20" rx="3" stroke="currentColor" strokeWidth="2" fill="none" strokeDasharray="3 2"/>
+                    <line x1="22" y1="24" x2="26" y2="24" stroke="currentColor" strokeWidth="2" strokeDasharray="2 2"/>
+                    <line x1="8" y1="22" x2="18" y2="22" stroke="currentColor" strokeWidth="1.5" opacity="0.4"/>
+                    <line x1="8" y1="26" x2="14" y2="26" stroke="currentColor" strokeWidth="1.5" opacity="0.4"/>
+                    <circle cx="38" cy="38" r="8" fill="var(--bg)" stroke="currentColor" strokeWidth="2"/>
+                    <line x1="35" y1="38" x2="41" y2="38" stroke="currentColor" strokeWidth="2"/>
+                    <line x1="38" y1="35" x2="38" y2="41" stroke="currentColor" strokeWidth="2"/>
+                  </svg>
+                </div>
+                <h3 className="empty-state-title">Add your first Data Model</h3>
+                <p className="empty-state-desc">Start by adding a Data Model to this dataset. You can then define joins between models to build a queryable structure.</p>
+                <button className="btn btn-primary" onClick={onOpenAddModel}>+ Add Data Model</button>
+              </div>
+            </div>
+          )}
+        </>
+      ) : activeEntities.length === 0 ? (
+        <div className="ds-canvas-empty">
+          <div className="empty-state empty-state-canvas">
+            <div className="empty-state-icon">
+              <svg width="44" height="44" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+                <rect x="4" y="14" width="18" height="20" rx="3" stroke="currentColor" strokeWidth="2" fill="none"/>
+                <rect x="26" y="14" width="18" height="20" rx="3" stroke="currentColor" strokeWidth="2" fill="none" strokeDasharray="3 2"/>
+                <line x1="22" y1="24" x2="26" y2="24" stroke="currentColor" strokeWidth="2" strokeDasharray="2 2"/>
+                <line x1="8" y1="22" x2="18" y2="22" stroke="currentColor" strokeWidth="1.5" opacity="0.4"/>
+                <line x1="8" y1="26" x2="14" y2="26" stroke="currentColor" strokeWidth="1.5" opacity="0.4"/>
+              </svg>
+            </div>
+            <h3 className="empty-state-title">No Data Models configured</h3>
+            <p className="empty-state-desc">This dataset doesn't have any Data Models yet. Switch to Edit mode to add models and define their relationships.</p>
+            <button className="btn" onClick={onEdit}>Edit dataset</button>
+          </div>
+        </div>
+      ) : (
+        <DatasetInspectView entities={activeEntities} joins={joins} />
+      )}
+
+      {/* Preview panel */}
+      {activeEntities.length > 0 && (() => {
+        const previewFields = activeEntities.flatMap((e) =>
+          e.fields.map((f) => ({ entity: e.id, key: f.key, label: f.label, type: f.type }))
+        );
+        const nullCount = PREVIEW_ROWS.filter((r) =>
+          previewFields.some((f) => r[f.key] === null)
+        ).length;
+        return (
+          <section className="prev-panel ds-prev-panel">
+            <header className="prev-hd">
+              <div className="prev-title">Preview · {PREVIEW_ROWS.length} rows</div>
+              {nullCount > 0 && (
+                <span className="badge badge-warn">{nullCount} row{nullCount !== 1 ? 's' : ''} with nulls</span>
+              )}
+            </header>
+            <div className="prev-scroll">
+              <table className="ptab">
+                <thead>
+                  <tr>
+                    {previewFields.map((f) => (
+                      <th key={`${f.entity}-${f.key}`} className={['#','$','fx'].includes(f.type) ? 'col-num' : ''}>
+                        {f.label}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {PREVIEW_ROWS.map((row, ri) => (
+                    <tr key={ri}>
+                      {previewFields.map((f) => (
+                        <td key={`${ri}-${f.entity}-${f.key}`} className={['#','$','fx'].includes(f.type) ? 'col-num' : ''}>
+                          {row[f.key] === null
+                            ? <span className="null-val">null</span>
+                            : row[f.key] !== undefined ? row[f.key] : <span className="null-val">—</span>
+                          }
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        );
+      })()}
+    </div>
+  );
+}
+
+// Simple entity card for the dataset canvas
+const ROLE_LABEL = { ID: 'Primary Key', DIMENSION: 'Dimension', MEASURE: 'Measure' };
+
+function DsEntityCardNode({ id, data }) {
+  const { label, source, sourceId, fields, allFields, hiddenCount, isEditing, onViewInModel, onRemove } = data;
+  const [popoverOpen, setPopoverOpen] = useState(false);
+
+  const ctx = useContext(DsActiveFieldContext);
+  const activeFieldKey = ctx?.activeDsField?.nodeId === id ? ctx.activeDsField.fieldKey : null;
+
+  const hiddenFields = allFields
+    ? allFields.filter((f) => f.visible === false || !fields.some((vf) => vf.key === f.key))
+    : [];
+
+  const handleNavigate = (e) => {
+    e.stopPropagation();
+    if (isEditing) {
+      // eslint-disable-next-line no-alert
+      if (!window.confirm('You have unsaved changes. Navigate away and lose them?')) return;
+    }
+    onViewInModel();
+  };
+
+  return (
+    <article className={`ecard ds-ecard${isEditing ? '' : ' ds-ecard-readonly'}`}>
+      <Handle type="source" position={Position.Right} id={`${id}-src`} className="entity-handle" />
+      <Handle type="target" position={Position.Left} id={`${id}-tgt`} className="entity-handle" />
+      <header className="ec-hd draggable">
+        <span className="ec-name">{label}</span>
+        {isEditing && onRemove && (
+          <button className="plain-btn ds-ecard-remove" onClick={onRemove} aria-label="Remove model" title="Remove from dataset">✕</button>
+        )}
+        <span className="ec-src" style={{ color: sourceBrandColor(sourceId) }}>{source}</span>
+      </header>
+      <div className="ec-fields">
+        {fields.map((field) => (
+          <div
+            key={field.key}
+            className={`frow ds-frow${activeFieldKey === field.key ? ' ds-frow-active' : ''}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!ctx) return;
+              ctx.setActiveDsField((prev) =>
+                prev?.nodeId === id && prev?.fieldKey === field.key
+                  ? null
+                  : { nodeId: id, fieldKey: field.key }
+              );
+            }}
+          >
+            <span className={`ftype ${field.isKey ? 'key' : ''} ${field.calc ? 'calc' : ''}`}>{field.type}</span>
+            <span className="fname">{field.label}</span>
+          </div>
+        ))}
+      </div>
+      {hiddenCount > 0 && (
+        <footer
+          className="ds-hidden-footer"
+          onMouseEnter={() => setPopoverOpen(true)}
+          onMouseLeave={() => setPopoverOpen(false)}
+        >
+          {popoverOpen && (
+            <div className="ds-hidden-popover">
+              <div className="ds-hidden-popover-title">Hidden fields</div>
+              {hiddenFields.map((f) => (
+                <div key={f.key} className="ds-hidden-popover-field">
+                  <span className={`ftype ${f.isKey ? 'key' : ''} ${f.calc ? 'calc' : ''}`}>{f.type}</span>
+                  <span>{f.label}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <span className="ds-hidden-trigger nodrag nopan">
+            {/* eye-slash icon */}
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
+              <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
+              <line x1="1" y1="1" x2="23" y2="23"/>
+            </svg>
+            <span className="ds-hidden-label">{hiddenCount} hidden field{hiddenCount !== 1 ? 's' : ''}</span>
+          </span>
+          <button
+            className="plain-btn ds-hidden-nav-btn nodrag nopan"
+            onClick={handleNavigate}
+            title="View in Data Model"
+            aria-label="View in Data Model"
+          >
+            {/* external-link / arrow-right icon */}
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+              <polyline points="15 3 21 3 21 9"/>
+              <line x1="10" y1="14" x2="21" y2="3"/>
+            </svg>
+          </button>
+        </footer>
+      )}
+    </article>
+  );
+}
+
+const dsNodeTypes = { dsEntity: DsEntityCardNode };
+
+function DatasetCanvasPane(props) {
+  return (
+    <ReactFlowProvider>
+      <DatasetCanvasPaneInner {...props} />
+    </ReactFlowProvider>
+  );
+}
+
+// ── Add Data Models modal ─────────────────────────────────────────────────
+function AddModelModal({ open, onClose, dataModels, currentModelIds, onAdd }) {
+  const [search, setSearch] = useState('');
+  const [checked, setChecked] = useState(new Set());
+
+  // Reset on open
+  useEffect(() => { if (open) { setSearch(''); setChecked(new Set()); } }, [open]);
+
+  const available = dataModels.filter(
+    (m) => !currentModelIds.includes(m.id) &&
+      (!search.trim() || m.name.toLowerCase().includes(search.trim().toLowerCase()))
+  );
+
+  const toggle = (id) => setChecked((prev) => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+
+  if (!open) return null;
+
+  return (
+    <Dialog.Root open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Backdrop className="dialog-backdrop" />
+        <Dialog.Viewport className="dialog-viewport">
+          <Dialog.Popup className="dialog-popup add-model-modal">
+            <Dialog.Title className="dialog-title">Add Data Models</Dialog.Title>
+
+          <div className="add-model-search-wrap">
+            <input
+              className="add-model-search"
+              placeholder="Search Data Models…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              autoFocus
+            />
+          </div>
+
+          <div className="add-model-list">
+            {available.length === 0 && (
+              <div className="add-model-empty">
+                {search ? 'No matching Data Models.' : 'All Data Models are already in this dataset.'}
+              </div>
+            )}
+            {available.map((m) => (
+              <label key={m.id} className="add-model-row">
+                <input
+                  type="checkbox"
+                  checked={checked.has(m.id)}
+                  onChange={() => toggle(m.id)}
+                  className="add-model-check"
+                />
+                <div className="add-model-row-info">
+                  <span className="add-model-row-name">{m.name}</span>
+                  <span className="add-model-row-source" style={{ color: sourceBrandColor(m.sourceId) }}>{m.sourceName}</span>
+                </div>
+              </label>
+            ))}
+          </div>
+
+          <div className="add-model-footer">
+            <button className="btn" onClick={() => setChecked(new Set())} disabled={checked.size === 0}>Clear</button>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn" onClick={onClose}>Cancel</button>
+              <button
+                className="btn btn-primary"
+                disabled={checked.size === 0}
+                onClick={() => { onAdd([...checked]); onClose(); }}
+              >
+                Add selected ({checked.size})
+              </button>
+            </div>
+          </div>
+          </Dialog.Popup>
+        </Dialog.Viewport>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+const OBJ_TYPE_LABELS = {
+  models: 'Models',
+  datasets: 'Datasets',
+  metrics: 'Metrics',
+};
+const OBJ_TYPE_DESCS = {
+  models: 'Semantic definitions of a single entity — fields, grain, and business meaning.',
+  datasets: 'Join configurations combining multiple Data Models into a queryable structure.',
+  metrics: 'Business-defined KPIs and calculated outcomes built on top of datasets.',
+};
+
+function CatalogLeftPane({
+  objectType, setObjectType, catalogSearch, setCatalogSearch,
+  selectedObjectId, selectedObjectType, onSelectItem,
+  dataModels, setDataModels, datasets, setDatasets, metrics,
+  isEditing, onOpenEditor, onEditModel, onEditDataset,
+}) {
+  const allDatasets = [...datasets.draft, ...datasets.dev, ...datasets.production];
+  const q = catalogSearch.trim().toLowerCase();
+
+  const filteredModels  = dataModels.filter((m) => !q || m.name.toLowerCase().includes(q));
+  const filteredDatasets = allDatasets.filter((d) => !q || d.name.toLowerCase().includes(q));
+  const filteredMetrics  = metrics.filter((m) => !q || m.name.toLowerCase().includes(q));
+
+  const counts = { models: dataModels.length, datasets: allDatasets.length, metrics: metrics.length };
+
+  const handleAddNew = (type) => {
+    if (type === 'model') {
+      const id = `model-${Date.now()}`;
+      const stub = { id, name: 'New Data Model', sourceId: 'sales-db', sourceName: 'Sales DB', description: '', grain: '', usedInDatasetIds: [], fields: [] };
+      setDataModels((prev) => [...prev, stub]);
+      setObjectType('models');
+      onSelectItem(id, 'models');
+    } else if (type === 'dataset') {
+      const id = `dataset-${Date.now()}`;
+      const stub = { id, name: 'New Dataset', desc: '', entities: 0, joins: 0, uses: 0, stage: 'draft', progress: 0, modelIds: [] };
+      setDatasets((prev) => ({ ...prev, draft: [...prev.draft, stub] }));
+      setObjectType('datasets');
+      onSelectItem(id, 'datasets');
+    } else if (type === 'metric') {
+      setObjectType('metrics');
+    }
+  };
+
+  return (
+    <div className="cat-left-pane">
+      {/* Search + Add row */}
+      <div className="cat-left-top">
+        <div className="cat-left-search-wrap">
+          <svg className="cat-search-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="6.5" cy="6.5" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.4"/><path d="M10 10l3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg>
+          <input
+            className="cat-left-search"
+            placeholder="Find…"
+            value={catalogSearch}
+            onChange={(e) => setCatalogSearch(e.target.value)}
+          />
+        </div>
+        <Menu.Root>
+          <Menu.Trigger className="btn cat-add-btn">Add ▾</Menu.Trigger>
+          <Menu.Portal>
+            <Menu.Positioner sideOffset={4} align="end">
+              <Menu.Popup className="menu-popup">
+                <Menu.Item className="menu-item" onClick={() => handleAddNew('model')}>New Data Model</Menu.Item>
+                <Menu.Item className="menu-item" onClick={() => handleAddNew('dataset')}>New Dataset</Menu.Item>
+                <Menu.Item className="menu-item" onClick={() => handleAddNew('metric')}>New Metric</Menu.Item>
+              </Menu.Popup>
+            </Menu.Positioner>
+          </Menu.Portal>
+        </Menu.Root>
+      </div>
+
+      {/* Type tab switcher */}
+      <div className="obj-type-tabs" role="tablist">
+        {['models', 'datasets', 'metrics'].map((t) => (
+          <button
+            key={t}
+            role="tab"
+            aria-selected={objectType === t}
+            className={`obj-type-tab ${objectType === t ? 'active' : ''}`}
+            onClick={() => setObjectType(t)}
+          >
+            {OBJ_TYPE_LABELS[t]} <span className="obj-type-count">{counts[t]}</span>
+          </button>
+        ))}
+      </div>
+
+      {/* Description */}
+      <p className="obj-type-desc">{OBJ_TYPE_DESCS[objectType]}</p>
+
+      {/* List */}
+      <div className="cat-left-list">
+        {objectType === 'models' && filteredModels.map((model) => (
+          <ModelListItem
+            key={model.id}
+            model={model}
+            selected={selectedObjectType === 'models' && selectedObjectId === model.id}
+            onClick={() => onSelectItem(model.id, 'models')}
+            onDelete={() => setDataModels((prev) => prev.filter((m) => m.id !== model.id))}
+            onEdit={() => onEditModel(model.id)}
+          />
+        ))}
+        {objectType === 'datasets' && filteredDatasets.map((ds) => (
+          <DatasetListItem
+            key={ds.id}
+            dataset={ds}
+            selected={selectedObjectType === 'datasets' && selectedObjectId === ds.id}
+            onClick={() => onSelectItem(ds.id, 'datasets')}
+            onEdit={() => onEditDataset(ds.id)}
+            onDelete={() => setDatasets((prev) => ({
+              draft: prev.draft.filter((d) => d.id !== ds.id),
+              dev: prev.dev.filter((d) => d.id !== ds.id),
+              production: prev.production.filter((d) => d.id !== ds.id),
+            }))}
+          />
+        ))}
+        {objectType === 'metrics' && filteredMetrics.map((m) => (
+          <MetricListItem
+            key={m.id}
+            metric={m}
+            selected={selectedObjectType === 'metrics' && selectedObjectId === m.id}
+            onClick={() => onSelectItem(m.id, 'metrics')}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── List item: Data Model ────────────────────────────────────────────────────
+function ModelListItem({ model, selected, onClick, onDelete, onEdit }) {
+  const used = model.usedInDatasetIds.length > 0;
+  const visibleCount = model.fields.filter((f) => f.visible !== false).length;
+  const totalCount = model.fields.length;
+
+  return (
+    <div
+      className={`obj-list-item ${selected ? 'selected' : ''}`}
+      onClick={onClick}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === 'Enter') onClick(); }}
+    >
+      <div className="obj-list-main">
+        <div className="obj-list-name-row">
+          <span className="obj-list-name">{model.name}</span>
+        </div>
+        <div className="obj-list-source" style={{ color: sourceBrandColor(model.sourceId) }}>{model.sourceName}</div>
+      </div>
+      <div className="obj-list-right">
+        <TooltipPrimitive.Provider delayDuration={300}>
+          <TooltipPrimitive.Root>
+            <TooltipPrimitive.Trigger asChild>
+              <span className={`obj-list-dot ${used ? 'used' : ''}`} aria-label={used ? 'Used in datasets' : 'Not used'} />
+            </TooltipPrimitive.Trigger>
+            <TooltipPrimitive.Portal>
+              <TooltipPrimitive.Content className="obj-tooltip" sideOffset={5}>
+                {used
+                  ? `Used in: ${model.usedInDatasetIds.join(', ')}`
+                  : 'Not used in any dataset yet.'}
+                <TooltipPrimitive.Arrow className="obj-tooltip-arrow" />
+              </TooltipPrimitive.Content>
+            </TooltipPrimitive.Portal>
+          </TooltipPrimitive.Root>
+        </TooltipPrimitive.Provider>
+        <span className="obj-list-fields">{visibleCount} of {totalCount} fields</span>
+      </div>
+      <Menu.Root>
+        <Menu.Trigger className="plain-btn obj-list-menu" onClick={(e) => e.stopPropagation()} aria-label="Model options">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <circle cx="7" cy="2.5" r="1.25" fill="currentColor"/>
+            <circle cx="7" cy="7" r="1.25" fill="currentColor"/>
+            <circle cx="7" cy="11.5" r="1.25" fill="currentColor"/>
+          </svg>
+        </Menu.Trigger>
+        <Menu.Portal>
+          <Menu.Positioner>
+            <Menu.Popup className="menu-popup" side="top" align="end" sideOffset={6}>
+              <Menu.Item className="menu-item" onClick={(e) => { e.stopPropagation(); onEdit(); }}>Edit</Menu.Item>
+              <Menu.Item className="menu-item danger" onClick={(e) => { e.stopPropagation(); onDelete(); }}>Delete</Menu.Item>
+            </Menu.Popup>
+          </Menu.Positioner>
+        </Menu.Portal>
+      </Menu.Root>
+    </div>
+  );
+}
+
+// ── List item: Dataset ───────────────────────────────────────────────────────
+function DatasetListItem({ dataset, selected, onClick, onEdit, onDelete }) {
+  const usageScore = usageScoreFromCount(dataset.uses);
+  return (
+    <div
+      className={`obj-list-item ${selected ? 'selected' : ''}`}
+      onClick={onClick}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === 'Enter') onClick(); }}
+    >
+      <div className="obj-list-main">
+        <div className="obj-list-name-row">
+          <span className="obj-list-name">{dataset.name}</span>
+        </div>
+        <div className="obj-list-meta">{dataset.entities} Entities · {dataset.joins} Joins</div>
+      </div>
+      <div className="obj-list-right">
+        <span className="mcard-usage" aria-label={`Usage score ${usageScore} of 5`}>
+          <span className="mcard-usage-dots" aria-hidden="true">
+            {Array.from({ length: 5 }, (_, i) => (
+              <span key={i} className={`mcard-usage-dot ${i < usageScore ? 'is-filled' : ''}`} />
+            ))}
+          </span>
+          <span className="mcard-uses">{dataset.uses}</span>
+        </span>
+      </div>
+      <Menu.Root>
+        <Menu.Trigger className="plain-btn obj-list-menu" onClick={(e) => e.stopPropagation()} aria-label="Dataset options">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <circle cx="7" cy="2.5" r="1.25" fill="currentColor"/>
+            <circle cx="7" cy="7" r="1.25" fill="currentColor"/>
+            <circle cx="7" cy="11.5" r="1.25" fill="currentColor"/>
+          </svg>
+        </Menu.Trigger>
+        <Menu.Portal>
+          <Menu.Positioner>
+            <Menu.Popup className="menu-popup" side="top" align="end" sideOffset={6}>
+              <Menu.Item className="menu-item" onClick={(e) => { e.stopPropagation(); onEdit(); }}>Edit</Menu.Item>
+              <Menu.Item className="menu-item danger" onClick={(e) => { e.stopPropagation(); onDelete(); }}>Delete</Menu.Item>
+            </Menu.Popup>
+          </Menu.Positioner>
+        </Menu.Portal>
+      </Menu.Root>
+    </div>
+  );
+}
+
+// ── List item: Metric ────────────────────────────────────────────────────────
+function MetricListItem({ metric, selected, onClick }) {
+  return (
+    <div
+      className={`obj-list-item ${selected ? 'selected' : ''}`}
+      onClick={onClick}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === 'Enter') onClick(); }}
+    >
+      <div className="obj-list-main">
+        <span className="obj-list-name">{metric.name}</span>
+        <div className="obj-list-meta">{metric.aggregation} · {metric.datasetId}</div>
+      </div>
+      <span className={`badge badge-neutral`}>{metric.aggregation}</span>
+    </div>
+  );
+}
+
+// ── Data Model detail pane ───────────────────────────────────────────────────
+function DataModelDetail({ model, isEditing, editDraft, setIsEditing, setEditDraft, onSave, onCancel }) {
+  const [fieldSearch, setFieldSearch] = useState('');
+  const [calcModalOpen, setCalcModalOpen] = useState(false);
+  const [calcEditTarget, setCalcEditTarget] = useState(null); // field being edited
+  if (!model) return null;
+
+  const active = isEditing ? editDraft : model;
+  const visibleCount = active.fields.filter((f) => f.visible !== false).length;
+
+  const q = fieldSearch.trim().toLowerCase();
+  const dimensionFields = active.fields.filter((f) => f.role !== 'MEASURE' && (!q || f.key.toLowerCase().includes(q) || f.label.toLowerCase().includes(q)));
+  const measureFields   = active.fields.filter((f) => f.role === 'MEASURE'  && (!q || f.key.toLowerCase().includes(q) || f.label.toLowerCase().includes(q)));
+
+  const handleEdit = () => {
+    setEditDraft(JSON.parse(JSON.stringify(model)));
+    setIsEditing(true);
+  };
+
+  const updateDraftField = (fieldKey, prop, value) => {
+    setEditDraft((prev) => ({
+      ...prev,
+      fields: prev.fields.map((f) => f.key === fieldKey ? { ...f, [prop]: value } : f),
+    }));
+  };
+
+  const toggleFieldVisible = (fieldKey) => {
+    if (isEditing) {
+      updateDraftField(fieldKey, 'visible', !(editDraft.fields.find((f) => f.key === fieldKey)?.visible ?? true));
+    }
+  };
+
+  return (
+    <div className="dm-detail">
+      {/* Header */}
+      <div className="dm-header">
+        <div className="dm-header-left">
+          {isEditing ? (
+            <input
+              className="dm-name-input"
+              value={editDraft.name}
+              onChange={(e) => setEditDraft((p) => ({ ...p, name: e.target.value }))}
+              autoFocus
+            />
+          ) : (
+            <h2 className="dm-title">{model.name}</h2>
+          )}
+          <span className="dm-source-label" style={{ color: sourceBrandColor(model.sourceId) }}>{model.sourceName}</span>
+        </div>
+        <div className="dm-header-actions">
+          {isEditing ? (
+            <>
+              <button className="btn" onClick={onCancel}>Cancel</button>
+              <button className="btn btn-primary" onClick={() => onSave(editDraft)}>Save</button>
+            </>
+          ) : (
+            <button className="btn" onClick={handleEdit}>Edit</button>
+          )}
+        </div>
+      </div>
+
+      {/* Description */}
+      {isEditing ? (
+        <textarea
+          className="dm-desc-ta"
+          value={editDraft.description}
+          onChange={(e) => setEditDraft((p) => ({ ...p, description: e.target.value }))}
+          placeholder="Describe this model for AI and collaborators…"
+        />
+      ) : (
+        <p className="dm-desc">{model.description}</p>
+      )}
+
+      {/* Grain */}
+      <div className="dm-grain-row">
+        <span className="dm-grain-lbl">Grain</span>
+        {isEditing ? (
+          <input
+            className="dm-grain-input"
+            value={editDraft.grain || ''}
+            onChange={(e) => setEditDraft((p) => ({ ...p, grain: e.target.value }))}
+            placeholder="e.g. One row per order line item"
+          />
+        ) : (
+          <span className="dm-grain-val">{active.grain || <span className="dm-grain-empty">Not set</span>}</span>
+        )}
+      </div>
+
+      {/* Fields section header */}
+      <div className="dm-fields-header">
+        <span className="dm-fields-title">Visible fields <span className="dm-fields-count">({visibleCount} of {active.fields.length})</span></span>
+        <div className="dm-fields-actions">
+          {isEditing && (
+            <button className="plain-btn dm-add-calc-btn" onClick={() => setCalcModalOpen(true)}>
+              <span className="dm-add-calc-icon">fx</span>
+              Add calculated field
+            </button>
+          )}
+          <input
+            className="dm-field-search"
+            placeholder="Search fields…"
+            value={fieldSearch}
+            onChange={(e) => setFieldSearch(e.target.value)}
+          />
+        </div>
+      </div>
+
+      {/* Fields table */}
+      <table className="dm-fields-table">
+        <thead>
+          <tr>
+            <th className="dm-th dm-th-vis">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </th>
+            <th className="dm-th dm-th-field">Field</th>
+            <th className="dm-th dm-th-display">Display name</th>
+            <th className="dm-th dm-th-role">Role</th>
+            <th className="dm-th dm-th-synonyms">Synonyms</th>
+            <th className="dm-th dm-th-desc">Description</th>
+            <th className="dm-th dm-th-opts">
+              <button className="plain-btn dm-col-opts" aria-label="Column options">⋯</button>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {[...dimensionFields, ...measureFields].map((field) => (
+            <DataModelFieldRow
+              key={field.key}
+              field={field}
+              isEditing={isEditing}
+              onToggleVisible={() => toggleFieldVisible(field.key)}
+              onUpdateField={(prop, val) => updateDraftField(field.key, prop, val)}
+              onEditCalcField={field.calc ? () => { setCalcEditTarget(field); setCalcModalOpen(true); } : undefined}
+            />
+          ))}
+        </tbody>
+      </table>
+
+      <CalcFieldModal
+        isOpen={calcModalOpen}
+        onClose={() => { setCalcModalOpen(false); setCalcEditTarget(null); }}
+        availableFields={active.fields}
+        editField={calcEditTarget}
+        onSave={({ name, formula, agg }) => {
+          if (calcEditTarget) {
+            // Update existing calc field
+            updateDraftField(calcEditTarget.key, 'label', name);
+            updateDraftField(calcEditTarget.key, 'formula', formula);
+            updateDraftField(calcEditTarget.key, 'agg', agg);
+          } else {
+            const newField = {
+              key: name.toLowerCase().replace(/\s+/g, '_'),
+              label: name,
+              type: 'fx',
+              role: 'MEASURE',
+              visible: true,
+              calc: true,
+              formula,
+              agg,
+              semanticDesc: '',
+              synonyms: '',
+            };
+            setEditDraft((prev) => ({ ...prev, fields: [...prev.fields, newField] }));
+          }
+          setCalcModalOpen(false);
+          setCalcEditTarget(null);
+        }}
+      />
+    </div>
+  );
+}
+
+function DataModelFieldRow({ field, isEditing, onToggleVisible, onUpdateField, onEditCalcField }) {
+  const isVisible = field.visible !== false;
+  const autoName = autoDisplayName(field.key);
+  const displayName = field.displayName || '';
+  const isAutoName = !displayName || displayName === autoName;
+  const [formulaPopoverOpen, setFormulaPopoverOpen] = useState(false);
+
+  return (
+    <tr className={`dm-field-row ${!isVisible ? 'dm-row-hidden' : ''}`}>
+      <td className="dm-td dm-td-vis">
+        <div className="dm-vis-cell">
+          <Switch.Root
+            className="dm-vis-switch"
+            checked={isVisible}
+            onCheckedChange={onToggleVisible}
+            disabled={!isEditing}
+            aria-label={`${isVisible ? 'Hide' : 'Show'} ${field.label}`}
+          >
+            <Switch.Thumb className="dm-vis-switch-thumb" />
+          </Switch.Root>
+          <svg className="dm-vis-eye" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        </div>
+      </td>
+      <td className="dm-td dm-td-field">
+        <span className={`ftype ${field.isKey ? 'key' : ''} ${field.calc ? 'calc' : ''}`}>{field.type}</span>
+        <span className="dm-field-name">{field.label}</span>
+      </td>
+      <td className="dm-td dm-td-display">
+        {isEditing ? (
+          <input
+            className="dm-cell-input"
+            value={displayName}
+            placeholder={autoName}
+            onChange={(e) => onUpdateField('displayName', e.target.value)}
+          />
+        ) : (
+          <span className={isAutoName ? 'dm-auto-name' : 'dm-custom-name'}>
+            {displayName || autoName}
+          </span>
+        )}
+      </td>
+      <td className="dm-td dm-td-role">
+        {isEditing ? (
+          <Select.Root
+            value={field.role}
+            onValueChange={(v) => onUpdateField('role', v)}
+            items={['ID', 'DIMENSION', 'MEASURE']}
+          >
+            <Select.Trigger className="bu-trigger dm-role-trigger">
+              <Select.Value />
+              <Select.Icon className="bu-icon">▾</Select.Icon>
+            </Select.Trigger>
+            <Select.Portal>
+              <Select.Positioner>
+                <Select.Popup className="bu-popup">
+                  <Select.List>
+                    {['ID', 'DIMENSION', 'MEASURE'].map((r) => (
+                      <Select.Item key={r} value={r} className="bu-item">
+                        <Select.ItemText>{r}</Select.ItemText>
+                      </Select.Item>
+                    ))}
+                  </Select.List>
+                </Select.Popup>
+              </Select.Positioner>
+            </Select.Portal>
+          </Select.Root>
+        ) : (
+          <span className={`dm-role-label dm-role-${field.role?.toLowerCase()}`}>{field.role}</span>
+        )}
+      </td>
+      <td className="dm-td dm-td-synonyms">
+        {isEditing ? (
+          <input
+            className="dm-cell-input"
+            value={field.synonyms || ''}
+            placeholder="e.g. revenue, GMV"
+            onChange={(e) => onUpdateField('synonyms', e.target.value)}
+          />
+        ) : (
+          <div className="dm-synonym-pills">
+            {(field.synonyms || '').split(',').map((s) => s.trim()).filter(Boolean).map((s) => (
+              <span key={s} className="synonym-tag">{s}</span>
+            ))}
+          </div>
+        )}
+      </td>
+      <td className="dm-td dm-td-desc">
+        {isEditing ? (
+          <input
+            className="dm-cell-input"
+            value={field.semanticDesc || ''}
+            placeholder="Add a description…"
+            onChange={(e) => onUpdateField('semanticDesc', e.target.value)}
+          />
+        ) : (
+          <span className="dm-desc-cell" title={field.semanticDesc}>{field.semanticDesc}</span>
+        )}
+      </td>
+      <td className="dm-td dm-td-opts">
+        {field.calc && isEditing && onEditCalcField && (
+          <button
+            className="plain-btn dm-edit-calc-btn"
+            onClick={onEditCalcField}
+            title="Edit formula"
+            aria-label={`Edit formula for ${field.label}`}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          </button>
+        )}
+        {field.calc && !isEditing && field.formula && (
+          <div
+            className="dm-formula-popover-wrap"
+            onMouseEnter={() => setFormulaPopoverOpen(true)}
+            onMouseLeave={() => setFormulaPopoverOpen(false)}
+          >
+            <button className="plain-btn dm-formula-peek-btn" aria-label="View formula">
+              <span className="dm-formula-peek-icon">fx</span>
+            </button>
+            {formulaPopoverOpen && (
+              <div className="dm-formula-popover">
+                <div className="dm-formula-popover-label">Formula</div>
+                <code className="dm-formula-popover-code">{field.formula}</code>
+                {field.agg && <div className="dm-formula-popover-agg">Aggregation: <strong>{field.agg}</strong></div>}
+              </div>
+            )}
+          </div>
+        )}
+      </td>
+    </tr>
+  );
+}
+
 function App() {
   const [view, setView] = useState('catalog');
-  const [search, setSearch] = useState('');
+  // eslint-disable-next-line no-unused-vars
+  const [search] = useState('');
   const [stage, setStage] = useState('dev');
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
@@ -1150,8 +2936,8 @@ function App() {
   const [inspectView, setInspectView] = useState('visual');
   const [hoveredJoinType, setHoveredJoinType] = useState(null);
   const [joins, setJoins] = useState({
-    jp1: { id: 'jp1', type: 'LEFT', fromEntity: 'orders', toEntity: 'customers', from: 'orders.customer_id', to: 'customers.customer_id', semantics: 'Many-to-one · Optional relationship (Orders → Customer)', desc: 'Connects sales to customer profiles. Preservation: All orders are kept regardless of customer match.', fromChoices: ['orders.customer_id', 'orders.order_id', 'orders.product_id'], toChoices: ['customers.customer_id', 'customers.full_name'] },
-    jp2: { id: 'jp2', type: 'INNER', fromEntity: 'orders', toEntity: 'products', from: 'orders.product_id', to: 'products.product_id', semantics: 'Many-to-one · Required relationship (Orders → Product)', desc: 'Connects sales to product catalog. Filter: Only orders with a valid product SKU are included.', fromChoices: ['orders.product_id', 'orders.order_id'], toChoices: ['products.product_id', 'products.product_name'] },
+    jp1: { id: 'jp1', type: 'LEFT', fromEntity: 'orders', toEntity: 'customers', from: 'orders.customer_id', to: 'customers.customer_id', cardinality: 'many-to-one', semantics: 'Many-to-one · Optional relationship (Orders → Customer)', desc: 'Connects sales to customer profiles. Preservation: All orders are kept regardless of customer match.', fromChoices: ['orders.customer_id', 'orders.order_id', 'orders.product_id'], toChoices: ['customers.customer_id', 'customers.full_name'] },
+    jp2: { id: 'jp2', type: 'INNER', fromEntity: 'orders', toEntity: 'products', from: 'orders.product_id', to: 'products.product_id', cardinality: 'many-to-one', semantics: 'Many-to-one · Required relationship (Orders → Product)', desc: 'Connects sales to product catalog. Filter: Only orders with a valid product SKU are included.', fromChoices: ['orders.product_id', 'orders.order_id'], toChoices: ['products.product_id', 'products.product_name'] },
   });
   const [entityPositions, setEntityPositions] = useState(() => {
     // Pre-compute Dagre layout so the first render already has correct positions.
@@ -1175,16 +2961,28 @@ function App() {
 
   // Lifted to state so new entities and models can be added
   const [canvasEntities, setCanvasEntities] = useState(INITIAL_ENTITIES);
+  // eslint-disable-next-line no-unused-vars
   const [models, setModels] = useState(MODELS);
 
-  // Catalog tab
-  const [catalogTab, setCatalogTab] = useState('models'); // 'models' | 'sources'
-  const [sourcesSearch, setSourcesSearch] = useState('');
+  // ── Catalog state (new two-pane layout) ────────────────────────────────
+  const [objectType, setObjectType] = useState('models'); // left-pane tab only
+  const [selectedObjectId, setSelectedObjectId] = useState(null);  // right-pane item id
+  const [selectedObjectType, setSelectedObjectType] = useState(null); // right-pane item type
+  const [catalogSearch, setCatalogSearch] = useState('');
+  const [isEditing, setIsEditing] = useState(false);
+  const [editDraft, setEditDraft] = useState(null);
+  const [dataModels, setDataModels] = useState(DATA_MODELS_INITIAL);
+  const [datasets, setDatasets] = useState(DATASETS_INITIAL);
+  const [metrics] = useState(METRICS_INITIAL);
+  const [addModelOpen, setAddModelOpen] = useState(false);
 
   // Add data source modal state
   const [addSourceOpen, setAddSourceOpen] = useState(false);
   const [addSourceContext, setAddSourceContext] = useState('editor'); // 'editor' | 'new-model'
   const [connectedSources, setConnectedSources] = useState(() => new Set(['sales-db', 'product-db']));
+  const [connectedSourceConfigs, setConnectedSourceConfigs] = useState({});
+  const [srcDrawerOpen, setSrcDrawerOpen] = useState(false);
+  const [srcDrawerTarget, setSrcDrawerTarget] = useState(null); // null = list, string id = detail
   const [newModelName, setNewModelName] = useState('');
   const [expandedSources, setExpandedSources] = useState(new Set());
   const [addModalSearch, setAddModalSearch] = useState('');
@@ -1503,16 +3301,6 @@ function App() {
     return JSON.stringify(obj, null, 2);
   }, [stage, canvasEntities, hiddenFields, fieldDisplayNames, fieldDescriptions, fieldFormulas, joins]);
 
-  const filteredModels = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return models;
-    return {
-      draft: models.draft.filter((item) => item.name.toLowerCase().includes(q)),
-      dev: models.dev.filter((item) => item.name.toLowerCase().includes(q)),
-      production: models.production.filter((item) => item.name.toLowerCase().includes(q)),
-    };
-  }, [search, models]);
-
   const selectField = (entityId, field) => {
     if (!entityId || !field) { setActiveField(null); return; }
     setActiveField({ entityId, fieldKey: field.key, source: `${entityId}.${field.key}`, type: field.type });
@@ -1590,10 +3378,6 @@ function App() {
     setAddModalSearch('');
     setExpandedSources(new Set());
     setAddSourceOpen(true);
-  };
-
-  const handleConnectSource = (sourceId) => {
-    setConnectedSources((prev) => new Set([...prev, sourceId]));
   };
 
   // Direct-toggle: checking a table immediately adds/removes it from the canvas
@@ -1695,8 +3479,6 @@ function App() {
     resetAddSourceState();
   };
 
-  const handleNewModelClick = () => openAddSource('new-model');
-
   // ─────────────────────────────────────────────────────────────────────────
 
   return (
@@ -1707,24 +3489,25 @@ function App() {
           {view === 'catalog' ? (
             <div className="nav-brand">
               <span className="nav-brand-dot" />
-              Reveal
+              <span>Reveal</span>
+              <span className="nav-brand-sub">Data Catalog</span>
             </div>
           ) : (
             <>
-              <button className="plain-btn nav-back" title="Back to models" onClick={() => setView('catalog')}>←</button>
+              <button className="plain-btn nav-back" title="Back to catalog" onClick={() => setView('catalog')}>←</button>
               <Menu.Root>
                 <Menu.Trigger className="plain-btn nav-model-btn">Sales overview ▾</Menu.Trigger>
                 <Menu.Portal>
                   <Menu.Positioner sideOffset={6}>
                     <Menu.Popup className="menu-popup">
-                      <Menu.Item className="menu-item">Rename model</Menu.Item>
+                      <Menu.Item className="menu-item">Rename dataset</Menu.Item>
                       <Menu.Item className="menu-item">Edit description</Menu.Item>
                       <Menu.Item className="menu-item">Duplicate</Menu.Item>
                       <Menu.Separator className="menu-sep" />
                       <Menu.Item className="menu-item" onClick={() => setStage('production')}>Promote to production</Menu.Item>
                       <Menu.Item className="menu-item" onClick={() => setStage('draft')}>Move to draft</Menu.Item>
                       <Menu.Separator className="menu-sep" />
-                      <Menu.Item className="menu-item danger">Delete model</Menu.Item>
+                      <Menu.Item className="menu-item danger">Delete dataset</Menu.Item>
                     </Menu.Popup>
                   </Menu.Positioner>
                 </Menu.Portal>
@@ -1770,10 +3553,15 @@ function App() {
         )}
 
         {/* ── Right ── */}
+        {view === 'catalog' && (
+          <div className="nav-right">
+            <button className="btn" onClick={() => setSrcDrawerOpen(true)}>Edit data sources</button>
+          </div>
+        )}
         {view === 'editor' && (
           <div className="nav-right">
             <button className="btn" onClick={() => setView('inspect')}>Inspect view</button>
-            <button className="btn btn-primary" onClick={() => setAiOpen(true)}>Save model</button>
+            <button className="btn btn-primary" onClick={() => setAiOpen(true)}>Save dataset</button>
           </div>
         )}
         {view === 'inspect' && (
@@ -1786,141 +3574,212 @@ function App() {
 
       {view === 'catalog' ? (
         <section className="view active">
-          <div className="cat-bar">
-            <div className="cat-bar-inner">
-              <nav className="cat-tabs">
-                <button className={`cat-tab ${catalogTab === 'models' ? 'active' : ''}`} onClick={() => setCatalogTab('models')}>Models</button>
-                <button className={`cat-tab ${catalogTab === 'sources' ? 'active' : ''}`} onClick={() => setCatalogTab('sources')}>Data Sources</button>
-              </nav>
-              {catalogTab === 'models' && (
-                <div className="cat-bar-right">
-                  <input className="search-input" placeholder="Search models…" value={search} onChange={(e) => setSearch(e.target.value)} />
-                  <button className="btn btn-primary" onClick={handleNewModelClick}>+ New model</button>
+          <div className="catalog-layout">
+            <CatalogLeftPane
+              objectType={objectType}
+              setObjectType={setObjectType}
+              catalogSearch={catalogSearch}
+              setCatalogSearch={setCatalogSearch}
+              selectedObjectId={selectedObjectId}
+              selectedObjectType={selectedObjectType}
+              onSelectItem={(id, type) => { setSelectedObjectId(id); setSelectedObjectType(type); setIsEditing(false); setEditDraft(null); }}
+              dataModels={dataModels}
+              setDataModels={setDataModels}
+              datasets={datasets}
+              setDatasets={setDatasets}
+              metrics={metrics}
+              isEditing={isEditing}
+              onOpenEditor={(datasetStage) => { setView('editor'); setStage(datasetStage); }}
+              onEditModel={(modelId) => {
+                const model = dataModels.find((m) => m.id === modelId);
+                if (!model) return;
+                setSelectedObjectId(modelId);
+                setSelectedObjectType('models');
+                setEditDraft(JSON.parse(JSON.stringify(model)));
+                setIsEditing(true);
+              }}
+              onEditDataset={(dsId) => {
+                const allDs = [...datasets.draft, ...datasets.dev, ...datasets.production];
+                const ds = allDs.find((d) => d.id === dsId);
+                if (!ds) return;
+                setSelectedObjectId(dsId);
+                setSelectedObjectType('datasets');
+                setEditDraft(JSON.parse(JSON.stringify(ds)));
+                setIsEditing(true);
+              }}
+            />
+            <div className="cat-right-pane">
+              {/* Data Model detail */}
+              {selectedObjectType === 'models' && selectedObjectId && (
+                <DataModelDetail
+                  model={dataModels.find((m) => m.id === selectedObjectId)}
+                  isEditing={isEditing}
+                  editDraft={editDraft}
+                  setIsEditing={setIsEditing}
+                  setEditDraft={setEditDraft}
+                  onSave={(draft) => {
+                    setDataModels((prev) => prev.map((m) => m.id === draft.id ? draft : m));
+                    setIsEditing(false);
+                    setEditDraft(null);
+                  }}
+                  onCancel={() => { setIsEditing(false); setEditDraft(null); }}
+                />
+              )}
+
+              {/* Dataset canvas */}
+              {selectedObjectType === 'datasets' && selectedObjectId && (() => {
+                const allDs = [...datasets.draft, ...datasets.dev, ...datasets.production];
+                const ds = allDs.find((d) => d.id === selectedObjectId);
+                if (!ds) return null;
+                return (
+                  <DatasetCanvasPane
+                    key={selectedObjectId}
+                    dataset={ds}
+                    dataModels={dataModels}
+                    isEditing={isEditing}
+                    editDraft={editDraft}
+                    setEditDraft={setEditDraft}
+                    onEdit={() => {
+                      setEditDraft(JSON.parse(JSON.stringify(ds)));
+                      setIsEditing(true);
+                    }}
+                    onCancel={() => { setIsEditing(false); setEditDraft(null); }}
+                    onSave={(draft) => {
+                      setDatasets((prev) => {
+                        const update = (arr) => arr.map((d) => d.id === draft.id ? { ...d, ...draft } : d);
+                        return { draft: update(prev.draft), dev: update(prev.dev), production: update(prev.production) };
+                      });
+                      setIsEditing(false);
+                      setEditDraft(null);
+                    }}
+                    onOpenAddModel={() => setAddModelOpen(true)}
+                    onNavigateToModel={(id) => {
+                      setObjectType('models');
+                      setSelectedObjectId(id);
+                      setSelectedObjectType('models');
+                      setIsEditing(false);
+                      setEditDraft(null);
+                    }}
+                  />
+                );
+              })()}
+
+              {!selectedObjectId && objectType === 'models' && (
+                <div className="cat-right-empty">
+                  <div className="empty-state">
+                    <div className="empty-state-icon">
+                      <svg width="48" height="48" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+                        <rect x="6" y="10" width="36" height="28" rx="4" stroke="currentColor" strokeWidth="2" fill="none"/>
+                        <line x1="6" y1="18" x2="42" y2="18" stroke="currentColor" strokeWidth="2"/>
+                        <line x1="6" y1="26" x2="42" y2="26" stroke="currentColor" strokeWidth="2"/>
+                        <line x1="16" y1="10" x2="16" y2="38" stroke="currentColor" strokeWidth="2"/>
+                        <circle cx="38" cy="38" r="8" fill="var(--bg)" stroke="currentColor" strokeWidth="2"/>
+                        <line x1="35" y1="38" x2="41" y2="38" stroke="currentColor" strokeWidth="2"/>
+                        <line x1="38" y1="35" x2="38" y2="41" stroke="currentColor" strokeWidth="2"/>
+                      </svg>
+                    </div>
+                    <h3 className="empty-state-title">No model selected</h3>
+                    <p className="empty-state-desc">Data Models define the semantic meaning of a table — fields, grain, roles, and synonyms that AI and analysts can rely on.</p>
+                    <div className="empty-state-actions">
+                      <button className="btn btn-primary" onClick={() => {
+                        const id = `model-${Date.now()}`;
+                        const stub = { id, name: 'New Data Model', sourceId: 'sales-db', sourceName: 'Sales DB', description: '', grain: '', usedInDatasetIds: [], fields: [] };
+                        setDataModels((prev) => [...prev, stub]);
+                        setObjectType('models');
+                        setSelectedObjectId(id);
+                        setSelectedObjectType('models');
+                      }}>+ New Data Model</button>
+                    </div>
+                    <div className="empty-state-hints">
+                      <span className="empty-hint"><span className="empty-hint-key">↑</span> Select a model from the list</span>
+                      <span className="empty-hint"><span className="empty-hint-key">⌘K</span> Search models</span>
+                    </div>
+                  </div>
                 </div>
               )}
-              {catalogTab === 'sources' && (
-                <div className="cat-bar-right">
-                  <input className="search-input" placeholder="Search data sources…" value={sourcesSearch} onChange={(e) => setSourcesSearch(e.target.value)} />
+              {!selectedObjectId && objectType === 'datasets' && (
+                <div className="cat-right-empty">
+                  <div className="empty-state">
+                    <div className="empty-state-icon">
+                      <svg width="48" height="48" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+                        <rect x="4" y="14" width="18" height="20" rx="3" stroke="currentColor" strokeWidth="2" fill="none"/>
+                        <rect x="26" y="14" width="18" height="20" rx="3" stroke="currentColor" strokeWidth="2" fill="none"/>
+                        <line x1="22" y1="24" x2="26" y2="24" stroke="currentColor" strokeWidth="2"/>
+                        <polyline points="24,21 27,24 24,27" stroke="currentColor" strokeWidth="2" fill="none" strokeLinejoin="round" strokeLinecap="round"/>
+                        <line x1="8" y1="22" x2="18" y2="22" stroke="currentColor" strokeWidth="1.5" opacity="0.5"/>
+                        <line x1="8" y1="26" x2="14" y2="26" stroke="currentColor" strokeWidth="1.5" opacity="0.5"/>
+                        <line x1="30" y1="22" x2="40" y2="22" stroke="currentColor" strokeWidth="1.5" opacity="0.5"/>
+                        <line x1="30" y1="26" x2="36" y2="26" stroke="currentColor" strokeWidth="1.5" opacity="0.5"/>
+                      </svg>
+                    </div>
+                    <h3 className="empty-state-title">No dataset selected</h3>
+                    <p className="empty-state-desc">Datasets join multiple Data Models into a queryable structure. Define how tables relate so AI can generate accurate queries.</p>
+                    <div className="empty-state-actions">
+                      <button className="btn btn-primary" onClick={() => {
+                        const id = `dataset-${Date.now()}`;
+                        const stub = { id, name: 'New Dataset', desc: '', entities: 0, joins: 0, uses: 0, stage: 'draft', progress: 0, modelIds: [] };
+                        setDatasets((prev) => ({ ...prev, draft: [...prev.draft, stub] }));
+                        setObjectType('datasets');
+                        setSelectedObjectId(id);
+                        setSelectedObjectType('datasets');
+                      }}>+ New Dataset</button>
+                    </div>
+                    <div className="empty-state-hints">
+                      <span className="empty-hint"><span className="empty-hint-key">↑</span> Select a dataset from the list</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+              {!selectedObjectId && objectType === 'metrics' && (
+                <div className="cat-right-empty">
+                  <div className="empty-state">
+                    <div className="empty-state-icon">
+                      <svg width="48" height="48" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+                        <polyline points="6,36 16,24 24,30 34,14 42,20" stroke="currentColor" strokeWidth="2.5" fill="none" strokeLinejoin="round" strokeLinecap="round"/>
+                        <circle cx="34" cy="14" r="3" fill="currentColor" opacity="0.7"/>
+                        <line x1="6" y1="38" x2="42" y2="38" stroke="currentColor" strokeWidth="1.5" opacity="0.3"/>
+                        <line x1="6" y1="10" x2="6" y2="38" stroke="currentColor" strokeWidth="1.5" opacity="0.3"/>
+                      </svg>
+                    </div>
+                    <h3 className="empty-state-title">No metric selected</h3>
+                    <p className="empty-state-desc">Metrics are business-defined KPIs built on datasets — revenue, conversion, churn — with consistent aggregation logic.</p>
+                    <div className="empty-state-actions">
+                      <button className="btn btn-primary" onClick={() => setObjectType('metrics')}>+ New Metric</button>
+                    </div>
+                    <div className="empty-state-hints">
+                      <span className="empty-hint"><span className="empty-hint-key">↑</span> Select a metric from the list</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+              {/* Cross-type selection hint */}
+              {selectedObjectId && selectedObjectType !== objectType && (
+                <div className="cat-right-cross-hint">
+                  Showing {selectedObjectType} detail. Select an item from the list above to switch.
                 </div>
               )}
             </div>
           </div>
 
-          {catalogTab === 'models' && (
-            <div className="kanban">
-              {[
-                ['Draft', filteredModels.draft],
-                ['Testing', filteredModels.dev],
-                ['Production', filteredModels.production],
-              ].map(([label, list]) => (
-                <div key={label}>
-                  <div className="kcol-head">
-                    <span className="kcol-label">{label}</span>
-                    <span className="kcol-count">{list.length}</span>
-                  </div>
-                  {list.map((model) => {
-                    const usageScore = usageScoreFromCount(model.uses);
-                    return (
-                      <button key={model.id} className="plain-btn mcard" onClick={() => { setView('editor'); setStage(model.stage); }}>
-                        <div className="mcard-head">
-                          <div className="mcard-name">{model.name}</div>
-                          <span className="mcard-usage" aria-label={`Usage score ${usageScore} out of 5 from ${model.uses} uses`}>
-                            <span className="mcard-usage-dots" aria-hidden="true">
-                              {Array.from({ length: 5 }, (_, i) => (
-                                <span key={`${model.id}-usage-${i}`} className={`mcard-usage-dot ${i < usageScore ? 'is-filled' : ''}`} />
-                              ))}
-                            </span>
-                            <span className="mcard-uses">{model.uses}</span>
-                          </span>
-                        </div>
-                        <div className="mcard-desc">{model.desc}</div>
-                        <div className="mcard-foot">
-                          <span className="badge badge-neutral">{model.entities} entities</span>
-                          <span className="badge badge-neutral">{model.joins} joins</span>
-                          <span className={`badge ${model.stage === 'production' ? 'badge-prod' : model.stage === 'dev' ? 'badge-dev' : 'badge-draft'}`}>{model.stage === 'dev' ? 'testing' : model.stage}</span>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              ))}
-            </div>
-          )}
-
-          {catalogTab === 'sources' && (() => {
-            const q = sourcesSearch.toLowerCase().trim();
-            const filteredConnected = groupedSources.filter((s) => !q || s.name.toLowerCase().includes(q));
-            const filteredAvailable = CONNECTOR_CATEGORIES.map((cat) => ({
-              ...cat,
-              items: cat.items.filter((item) => !connectedSources.has(item.id) && (!q || item.name.toLowerCase().includes(q))),
-            })).filter((cat) => cat.items.length > 0);
-            return (
-              <div className="sources-page">
-                <div className="sources-content">
-                  {/* Connected grid */}
-                  {filteredConnected.length > 0 && (
-                    <div className="sources-grid">
-                      {filteredConnected.map((source) => {
-                        const cat = ITEM_CATEGORY_MAP[source.id];
-                        const bg = CAT_COLORS[cat] || '#f0f0f0';
-                        return (
-                          <div key={source.id} className="source-tile source-tile--connected">
-                            <div className="source-tile-icon" style={{ background: bg }}>
-                              {CONNECTOR_ICONS[source.id]
-                                ? <img src={`https://cdn.simpleicons.org/${CONNECTOR_ICONS[source.id]}`} alt="" className="source-row-img" />
-                                : <span>{connectorAbbr(source.name)}</span>}
-                            </div>
-                            <div className="source-tile-body">
-                              <div className="source-row-name">{source.name}</div>
-                              <div className="source-row-meta">{CATEGORY_LABELS[cat] || cat} · {source.tables.length} tables{source.views.length ? ` · ${source.views.length} views` : ''}</div>
-                            </div>
-                            <span className="source-row-status">✓ Connected</span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  {/* Separator */}
-                  {filteredConnected.length > 0 && filteredAvailable.length > 0 && (
-                    <hr className="sources-sep" />
-                  )}
-
-                  {/* Available grid grouped by category */}
-                  {filteredAvailable.map((cat) => (
-                    <div key={cat.category} className="sources-cat-block">
-                      <div className="sources-cat-label">{CATEGORY_LABELS[cat.category] || cat.category}</div>
-                      <div className="sources-grid">
-                        {cat.items.map((item) => {
-                          const bg = CAT_COLORS[cat.category] || '#f0f0f0';
-                          return (
-                            <div key={item.id} className="source-tile">
-                              <div className="source-tile-icon" style={{ background: bg }}>
-                                {CONNECTOR_ICONS[item.id]
-                                  ? <img src={`https://cdn.simpleicons.org/${CONNECTOR_ICONS[item.id]}`} alt="" className="source-row-img" />
-                                  : <span>{connectorAbbr(item.name)}</span>}
-                              </div>
-                              <div className="source-tile-body">
-                                <div className="source-row-name">{item.name}</div>
-                                <div className="source-row-meta">{CATEGORY_LABELS[cat.category] || cat.category}</div>
-                              </div>
-                              <button className="btn source-row-connect-btn" onClick={() => handleConnectSource(item.id)}>
-                                Connect
-                              </button>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ))}
-
-                  {filteredConnected.length === 0 && filteredAvailable.length === 0 && (
-                    <p className="sources-empty">No data sources match "{sourcesSearch}"</p>
-                  )}
-                </div>
-              </div>
-            );
-          })()}
+          {/* Add Data Models modal — always rendered when a dataset is selected so it persists across tab switches */}
+          <AddModelModal
+            open={addModelOpen}
+            onClose={() => setAddModelOpen(false)}
+            dataModels={dataModels}
+            currentModelIds={(() => {
+              const allDs = [...datasets.draft, ...datasets.dev, ...datasets.production];
+              const ds = editDraft ?? allDs.find((d) => d.id === selectedObjectId);
+              return ds?.modelIds ?? [];
+            })()}
+            onAdd={(newIds) => {
+              const allDs = [...datasets.draft, ...datasets.dev, ...datasets.production];
+              setEditDraft((prev) => {
+                const base = prev ?? JSON.parse(JSON.stringify(allDs.find((d) => d.id === selectedObjectId) ?? {}));
+                return { ...base, modelIds: [...new Set([...(base.modelIds ?? []), ...newIds])] };
+              });
+              setIsEditing(true);
+            }}
+          />
         </section>
       ) : null}
 
@@ -2112,80 +3971,88 @@ function App() {
                 </div>
               ) : null}
 
-              {inspectView === 'visual' ? <h3 className="insp-section-hd">Entities & fields</h3> : null}
               {inspectView === 'visual' ? (
-                <div className="insp-masonry">
-                  {canvasEntities.map((entity) => {
-                    const visibleEntityFields = entity.fields.filter((f) => !hiddenFields.has(f.key));
-                    const dimensionFields = visibleEntityFields.filter((f) => f.role !== 'MEASURE');
-                    const measureFields = visibleEntityFields.filter((f) => f.role === 'MEASURE');
-                    return (
-                      <article className={`ent-block ${entity.primary ? 'is-primary' : ''}`} key={entity.id}>
-                        <header className="ent-block-hd">
-                          <div className="ent-block-name-row">
-                            <span className="ent-block-name">{titleCase(entity.label)} <span className="ent-block-db">({entity.dbName})</span></span>
-                            {entity.primary ? <span className="ent-primary-badge">Primary</span> : null}
-                          </div>
-                          <div className="ent-block-grain">{entity.definition}</div>
-                        </header>
-                        {dimensionFields.length ? (
-                          <section className="field-group">
-                            <h4 className="field-group-title dimensions">Dimensions <span className="field-group-count">{dimensionFields.length}</span></h4>
-                            {dimensionFields.map((field) => (
-                              <div className="ifield" key={field.key}>
-                                <span className="ifield-type-chip">{field.type}</span>
-                                <div className="ifield-right">
-                                  <div className="ifield-name-row">
-                                    <span className="ifield-name">{fieldDisplayNames[field.key] || field.label}{fieldDisplayNames[field.key] ? <span className="ifield-orig">({field.label})</span> : null}</span>
-                                    {field.isKey && <span className="ifield-badge ifield-badge-key">key</span>}
-                                  </div>
-                                  {(fieldDescriptions[field.key] || field.semanticDesc) ? <p className="ifield-desc">{fieldDescriptions[field.key] || field.semanticDesc}</p> : null}
-                                </div>
+                <div className="insp-flex-row">
+                  <div className="insp-section">
+                    <h3 className="insp-section-hd" style={{ marginTop: 0 }}>Entities &amp; fields</h3>
+                    <div className="insp-cards-row">
+                      {canvasEntities.map((entity) => {
+                        const visibleEntityFields = entity.fields.filter((f) => !hiddenFields.has(f.key));
+                        const dimensionFields = visibleEntityFields.filter((f) => f.role !== 'MEASURE');
+                        const measureFields = visibleEntityFields.filter((f) => f.role === 'MEASURE');
+                        return (
+                          <article className={`ent-block ${entity.primary ? 'is-primary' : ''}`} key={entity.id}>
+                            <header className="ent-block-hd">
+                              <div className="ent-block-name-row">
+                                <span className="ent-block-name">{titleCase(entity.label)} <span className="ent-block-db">({entity.dbName})</span></span>
+                                {entity.primary ? <span className="ent-primary-badge">Primary</span> : null}
                               </div>
-                            ))}
-                          </section>
-                        ) : null}
-                        {measureFields.length ? (
-                          <section className="field-group">
-                            <h4 className="field-group-title measures">Measures <span className="field-group-count">{measureFields.length}</span></h4>
-                            {measureFields.map((field) => (
-                              <div className="ifield" key={field.key}>
-                                <span className="ifield-type-chip">{field.type}</span>
-                                <div className="ifield-right">
-                                  <div className="ifield-name-row">
-                                    <span className="ifield-name">{fieldDisplayNames[field.key] || field.label}{fieldDisplayNames[field.key] ? <span className="ifield-orig">({field.label})</span> : null}</span>
-                                    {field.calc && <span className="ifield-badge ifield-badge-calc">computed</span>}
-                                    {field.agg && <span className="ifield-badge ifield-badge-agg">{field.agg}</span>}
+                              <div className="ent-block-grain">{entity.definition}</div>
+                            </header>
+                            {dimensionFields.length ? (
+                              <section className="field-group">
+                                <h4 className="field-group-title dimensions">Dimensions <span className="field-group-count">{dimensionFields.length}</span></h4>
+                                {dimensionFields.map((field) => (
+                                  <div className="ifield" key={field.key}>
+                                    <span className="ifield-type-chip">{field.type}</span>
+                                    <div className="ifield-right">
+                                      <div className="ifield-name-row">
+                                        <span className="ifield-name">{fieldDisplayNames[field.key] || field.label}{fieldDisplayNames[field.key] ? <span className="ifield-orig">({field.label})</span> : null}</span>
+                                        {field.isKey && <span className="ifield-badge ifield-badge-key">key</span>}
+                                      </div>
+                                      {(fieldDescriptions[field.key] || field.semanticDesc) ? <p className="ifield-desc">{fieldDescriptions[field.key] || field.semanticDesc}</p> : null}
+                                    </div>
                                   </div>
-                                  {(fieldDescriptions[field.key] || field.semanticDesc) ? <p className="ifield-desc">{fieldDescriptions[field.key] || field.semanticDesc}</p> : null}
-                                </div>
-                              </div>
-                            ))}
-                          </section>
-                        ) : null}
-                      </article>
-                    );
-                  })}
-                </div>
-              ) : null}
+                                ))}
+                              </section>
+                            ) : null}
+                            {measureFields.length ? (
+                              <section className="field-group">
+                                <h4 className="field-group-title measures">Measures <span className="field-group-count">{measureFields.length}</span></h4>
+                                {measureFields.map((field) => (
+                                  <div className="ifield" key={field.key}>
+                                    <span className="ifield-type-chip">{field.type}</span>
+                                    <div className="ifield-right">
+                                      <div className="ifield-name-row">
+                                        <span className="ifield-name">{fieldDisplayNames[field.key] || field.label}{fieldDisplayNames[field.key] ? <span className="ifield-orig">({field.label})</span> : null}</span>
+                                        {field.calc && <span className="ifield-badge ifield-badge-calc">computed</span>}
+                                        {field.agg && <span className="ifield-badge ifield-badge-agg">{field.agg}</span>}
+                                      </div>
+                                      {(fieldDescriptions[field.key] || field.semanticDesc) ? <p className="ifield-desc">{fieldDescriptions[field.key] || field.semanticDesc}</p> : null}
+                                    </div>
+                                  </div>
+                                ))}
+                              </section>
+                            ) : null}
+                          </article>
+                        );
+                      })}
+                    </div>
+                  </div>
 
-              {inspectView === 'visual' ? <h3 className="insp-section-hd">Relationships & Core Logic</h3> : null}
-              {inspectView === 'visual' ? Object.values(joins).map((join) => (
-                <article className="join-block" key={join.id}>
-                  <header className="join-block-hd">
-                    <span className="join-name">{titleCase(join.fromEntity)} → {titleCase(join.toEntity)}</span>
-                    <div className="join-semantics">
-                      {join.semantics.replace(/\s*\(.*?\)\s*$/, '').split(' · ').map((part, i) => (
-                        <span key={i} className={`join-sem-part join-sem-part-${i}`}>{part}</span>
+                  <div className="insp-section">
+                    <h3 className="insp-section-hd" style={{ marginTop: 0 }}>Relationships &amp; Core Logic</h3>
+                    <div className="insp-cards-row">
+                      {Object.values(joins).map((join) => (
+                        <article className="join-block" key={join.id}>
+                          <header className="join-block-hd">
+                            <span className="join-name">{titleCase(join.fromEntity)} → {titleCase(join.toEntity)}</span>
+                            <div className="join-semantics">
+                              {join.semantics.replace(/\s*\(.*?\)\s*$/, '').split(' · ').map((part, i) => (
+                                <span key={i} className={`join-sem-part join-sem-part-${i}`}>{part}</span>
+                              ))}
+                            </div>
+                          </header>
+                          <div className="join-row"><p className="join-desc">{join.desc}</p></div>
+                          <div className="join-row">
+                            <p className="join-keys">Logic: Match on <span className="mono">{join.from.split('.')[1]}</span> = <span className="mono">{join.to.split('.')[1]}</span></p>
+                          </div>
+                        </article>
                       ))}
                     </div>
-                  </header>
-                  <div className="join-row"><p className="join-desc">{join.desc}</p></div>
-                  <div className="join-row">
-                    <p className="join-keys">Logic: Match on <span className="mono">{join.from.split('.')[1]}</span> = <span className="mono">{join.to.split('.')[1]}</span></p>
                   </div>
-                </article>
-              )) : null}
+                </div>
+              ) : null}
             </main>
 
             <aside className="insp-sidebar">
@@ -2416,7 +4283,525 @@ function App() {
           </Dialog.Viewport>
         </Dialog.Portal>
       </Dialog.Root>
+
+      {/* ── Source Drawer ── */}
+      <SourceDrawer
+        open={srcDrawerOpen}
+        onClose={() => { setSrcDrawerOpen(false); setSrcDrawerTarget(null); }}
+        connectedSources={connectedSources}
+        setConnectedSources={setConnectedSources}
+        connectedSourceConfigs={connectedSourceConfigs}
+        setConnectedSourceConfigs={setConnectedSourceConfigs}
+        drawerTarget={srcDrawerTarget}
+        setDrawerTarget={setSrcDrawerTarget}
+      />
     </div>
+  );
+}
+
+// ── SourceDrawer ─────────────────────────────────────────────────────────────
+function ConnectorIcon({ id, size = 24 }) {
+  const slug = CONNECTOR_ICONS[id];
+  if (slug) {
+    return (
+      <img
+        src={`https://cdn.simpleicons.org/${slug}`}
+        alt=""
+        width={size}
+        height={size}
+        className="src-icon-img"
+        onError={(e) => { e.currentTarget.style.display = 'none'; e.currentTarget.nextSibling.style.display = 'flex'; }}
+      />
+    );
+  }
+  return null;
+}
+
+function ConnectorAvatar({ id, name, size = 32 }) {
+  const slug = CONNECTOR_ICONS[id];
+  const cat = ITEM_CATEGORY_MAP[id];
+  const bg = CAT_COLORS[cat] || '#e8f0ff';
+  const stroke = darkenColor(bg);
+  return (
+    <span className="src-avatar" style={{ width: size, height: size, background: bg, boxShadow: `0 0 0 1.5px ${stroke}` }}>
+      {slug ? (
+        <>
+          <img
+            src={`https://cdn.simpleicons.org/${slug}`}
+            alt=""
+            width={size * 0.55}
+            height={size * 0.55}
+            className="src-icon-img"
+          />
+          <span className="src-avatar-abbr" style={{ display: 'none' }}>{connectorAbbr(name)}</span>
+        </>
+      ) : (
+        <span className="src-avatar-abbr">{connectorAbbr(name)}</span>
+      )}
+    </span>
+  );
+}
+
+function SchemaField({ field, value, onChange, required }) {
+  const { key, label, type, placeholder, options, hint } = field;
+
+  if (type === 'oauth') {
+    return (
+      <div className="src-field src-field-oauth">
+        <div className="src-field-label">{label}</div>
+        {field.hint && <div className="src-field-hint">{field.hint}</div>}
+        <button className="btn btn-primary src-oauth-btn" onClick={() => {}}>
+          Sign in
+        </button>
+      </div>
+    );
+  }
+
+  if (type === 'toggle') {
+    return (
+      <div className="src-field src-field-toggle">
+        <Switch.Root
+          className="bu-switch"
+          checked={!!value}
+          onCheckedChange={(v) => onChange(key, v)}
+        >
+          <Switch.Thumb className="bu-switch-thumb" />
+        </Switch.Root>
+        <label className="src-field-toggle-label">{label}</label>
+      </div>
+    );
+  }
+
+  if (type === 'select') {
+    return (
+      <div className="src-field">
+        <label className="src-field-label">{label}{required && <span className="src-field-required"> *</span>}</label>
+        <select
+          className="src-field-input src-field-select"
+          value={value || ''}
+          onChange={(e) => onChange(key, e.target.value)}
+        >
+          <option value="">Select…</option>
+          {(options || []).map((opt) => (
+            <option key={opt} value={opt}>{opt}</option>
+          ))}
+        </select>
+      </div>
+    );
+  }
+
+  if (type === 'textarea') {
+    return (
+      <div className="src-field">
+        <label className="src-field-label">{label}{required && <span className="src-field-required"> *</span>}</label>
+        <textarea
+          className="src-field-input src-field-textarea"
+          placeholder={placeholder}
+          value={value || ''}
+          onChange={(e) => onChange(key, e.target.value)}
+          rows={6}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="src-field">
+      <label className="src-field-label">{label}{required && <span className="src-field-required"> *</span>}</label>
+      <div className="src-field-input-wrap">
+        <input
+          className="src-field-input"
+          type={type === 'password' ? 'password' : type === 'number' ? 'number' : 'text'}
+          placeholder={placeholder}
+          value={value || ''}
+          onChange={(e) => onChange(key, e.target.value)}
+        />
+        {hint && <span className="src-field-hint-inline">{hint}</span>}
+      </div>
+    </div>
+  );
+}
+
+function SourceDrawer({
+  open,
+  onClose,
+  connectedSources,
+  setConnectedSources,
+  connectedSourceConfigs,
+  setConnectedSourceConfigs,
+  drawerTarget,
+  setDrawerTarget,
+}) {
+  const [formValues, setFormValues] = useState({});
+  const [tablesOpen, setTablesOpen] = useState(false);
+  const [viewsOpen, setViewsOpen] = useState(false);
+  const [drawerSearch, setDrawerSearch] = useState('');
+  const [selectedTables, setSelectedTables] = useState(new Set());
+  const [selectedViews, setSelectedViews] = useState(new Set());
+
+  // Animate detail pane: keep content visible during exit transition
+  const [contentTarget, setContentTarget] = useState(null);
+  const exitTimerRef = useRef(null);
+  useEffect(() => {
+    if (drawerTarget) {
+      if (exitTimerRef.current) { clearTimeout(exitTimerRef.current); exitTimerRef.current = null; }
+      setContentTarget(drawerTarget);
+    } else {
+      exitTimerRef.current = setTimeout(() => { setContentTarget(null); exitTimerRef.current = null; }, 300);
+    }
+  }, [drawerTarget]);
+  useEffect(() => () => { if (exitTimerRef.current) clearTimeout(exitTimerRef.current); }, []);
+
+  // Reset form + search when target/open changes
+  useEffect(() => {
+    if (drawerTarget) {
+      setFormValues(connectedSourceConfigs[drawerTarget] || {});
+      setTablesOpen(false);
+      setViewsOpen(false);
+      setSelectedTables(new Set(DATASOURCE_TABLES[drawerTarget]?.tables || []));
+      setSelectedViews(new Set(DATASOURCE_TABLES[drawerTarget]?.views || []));
+    } else {
+      setDrawerSearch('');
+    }
+  }, [drawerTarget, connectedSourceConfigs]);
+
+  const allItems = useMemo(() => {
+    const map = {};
+    CONNECTOR_CATEGORIES.forEach((cat) => cat.items.forEach((item) => { map[item.id] = item; }));
+    return map;
+  }, []);
+
+  const connectedList = Array.from(connectedSources).map((id) => allItems[id]).filter(Boolean);
+
+  const searchLower = drawerSearch.toLowerCase();
+  const filteredConnectedList = drawerSearch
+    ? connectedList.filter((item) => item.name.toLowerCase().includes(searchLower))
+    : connectedList;
+
+  const handleFieldChange = (key, val) => {
+    setFormValues((prev) => ({ ...prev, [key]: val }));
+  };
+
+  const handleSave = () => {
+    if (!drawerTarget) return;
+    setConnectedSourceConfigs((prev) => ({ ...prev, [drawerTarget]: formValues }));
+    setConnectedSources((prev) => {
+      const next = new Set(prev);
+      next.add(drawerTarget);
+      return next;
+    });
+    setDrawerTarget(null);
+  };
+
+  const handleDisconnect = () => {
+    if (!drawerTarget) return;
+    setConnectedSources((prev) => {
+      const next = new Set(prev);
+      next.delete(drawerTarget);
+      return next;
+    });
+    setConnectedSourceConfigs((prev) => {
+      const next = { ...prev };
+      delete next[drawerTarget];
+      return next;
+    });
+    setDrawerTarget(null);
+  };
+
+  const schemaKey = contentTarget ? CONNECTOR_SCHEMA_MAP[contentTarget] : null;
+  const schema = schemaKey ? CONNECTOR_CONFIG_SCHEMA[schemaKey] : null;
+  const contentTargetItem = contentTarget ? allItems[contentTarget] : null;
+  const isConnected = contentTarget ? connectedSources.has(contentTarget) : false;
+
+  const tables = contentTarget ? (DATASOURCE_TABLES[contentTarget] || {}) : {};
+  const tableList = tables.tables || [];
+  const viewList = tables.views || [];
+
+  return (
+    <>
+      {/* Overlay */}
+      <div
+        className={`src-overlay${open ? ' src-overlay-visible' : ''}`}
+        onClick={onClose}
+      />
+
+      {/* Panel */}
+      <aside className={`src-drawer${open ? ' src-drawer-open' : ''}`}>
+
+        {/* ── Detail pane (slides in from right) ─── */}
+        <div className={`src-pane src-pane-detail${drawerTarget ? ' src-pane-in' : ''}`}>
+          {contentTargetItem && (
+            <>
+            <div className="src-detail-hd">
+              <button className="src-back-btn" onClick={() => setDrawerTarget(null)}>
+                ← Back
+              </button>
+              <div className="src-detail-identity">
+                <div className="src-detail-identity-left">
+                  <ConnectorAvatar id={contentTargetItem.id} name={contentTargetItem.name} size={36} />
+                  <div>
+                    <div className="src-detail-name">{contentTargetItem.name}</div>
+                    {contentTargetItem.dbType && <div className="src-detail-type">{contentTargetItem.dbType}</div>}
+                  </div>
+                </div>
+                {isConnected && (
+                  <div className="src-connected-badge">
+                    <svg className="src-connected-check" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="8" fill="#16a34a"/><path d="M4.5 8.5l2.5 2.5 4.5-5" stroke="#fff" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" fill="none"/></svg>
+                    Connected
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Tabbed form + Data Objects — single scrollable region */}
+            <div className="src-drawer-body">
+              {schema ? (() => {
+                const hasConnMissing = schema.connection?.some((f) => !formValues[f.key]);
+                const hasAuthMissing = schema.auth?.some((f) => !formValues[f.key]);
+                return (
+                  <Tabs.Root defaultValue="connection" className="src-form-tabs">
+                    <Tabs.List className="src-form-tab-list">
+                      {schema.connection?.length > 0 && (
+                        <Tabs.Tab className="src-form-tab" value="connection">
+                          {hasConnMissing && <span className="src-tab-dot" aria-label="Required fields are missing"><span className="src-tab-dot-tip">Required fields are missing.</span></span>}
+                          Connection
+                        </Tabs.Tab>
+                      )}
+                      {schema.auth?.length > 0 && (
+                        <Tabs.Tab className="src-form-tab" value="auth">
+                          {hasAuthMissing && <span className="src-tab-dot" aria-label="Required fields are missing"><span className="src-tab-dot-tip">Required fields are missing.</span></span>}
+                          Authentication
+                        </Tabs.Tab>
+                      )}
+                      {schema.advanced?.length > 0 && (
+                        <Tabs.Tab className="src-form-tab" value="advanced">Advanced</Tabs.Tab>
+                      )}
+                    </Tabs.List>
+                    {schema.connection?.length > 0 && (
+                      <Tabs.Panel value="connection" className="src-field-group">
+                        {schema.connection.map((field) => (
+                          <SchemaField key={field.key} field={field} value={formValues[field.key]} onChange={handleFieldChange} required />
+                        ))}
+                      </Tabs.Panel>
+                    )}
+                    {schema.auth?.length > 0 && (
+                      <Tabs.Panel value="auth" className="src-field-group">
+                        {schema.auth.map((field) => (
+                          <SchemaField key={field.key} field={field} value={formValues[field.key]} onChange={handleFieldChange} required />
+                        ))}
+                      </Tabs.Panel>
+                    )}
+                    {schema.advanced?.length > 0 && (
+                      <Tabs.Panel value="advanced" className="src-field-group">
+                        {schema.advanced.map((field) => (
+                          <SchemaField key={field.key} field={field} value={formValues[field.key]} onChange={handleFieldChange} />
+                        ))}
+                      </Tabs.Panel>
+                    )}
+                  </Tabs.Root>
+                );
+              })() : (
+                <div className="src-empty-tab">No configuration available.</div>
+              )}
+
+              {/* Tables & Views section (only if connected and has data) */}
+              {isConnected && (tableList.length > 0 || viewList.length > 0) && (
+                <div className="src-tables-section">
+                  <div className="src-section-lbl">Data Objects</div>
+                  {tableList.length > 0 && (
+                    <div className="src-collapsible">
+                      <button
+                        className="src-collapsible-hd"
+                        onClick={() => setTablesOpen((v) => !v)}
+                      >
+                        <span>Tables</span>
+                        <span className="src-sel-count" data-partial={selectedTables.size < tableList.length}>{selectedTables.size} of {tableList.length} selected</span>
+                        <span className={`src-chevron${tablesOpen ? ' src-chevron-open' : ''}`}>›</span>
+                      </button>
+                      <div className={`src-collapsible-body-wrap${tablesOpen ? '' : ' collapsed'}`}>
+                        <div>
+                          <div className="src-collapsible-body">
+                            <label className="src-table-item src-table-item-selall" onClick={(e) => e.stopPropagation()}>
+                              <input
+                                type="checkbox"
+                                className="src-check"
+                                checked={selectedTables.size === tableList.length}
+                                onChange={(e) => setSelectedTables(e.target.checked ? new Set(tableList) : new Set())}
+                              />
+                              Select all
+                            </label>
+                            {tableList.map((t) => (
+                              <label key={t} className="src-table-item src-table-item-check" onClick={(e) => e.stopPropagation()}>
+                                <input
+                                  type="checkbox"
+                                  className="src-check"
+                                  checked={selectedTables.has(t)}
+                                  onChange={(e) => setSelectedTables((prev) => {
+                                    const next = new Set(prev);
+                                    e.target.checked ? next.add(t) : next.delete(t);
+                                    return next;
+                                  })}
+                                />
+                                {t}
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {viewList.length > 0 && (
+                    <div className="src-collapsible">
+                      <button
+                        className="src-collapsible-hd"
+                        onClick={() => setViewsOpen((v) => !v)}
+                      >
+                        <span>Views</span>
+                        <span className="src-sel-count" data-partial={selectedViews.size < viewList.length}>{selectedViews.size} of {viewList.length} selected</span>
+                        <span className={`src-chevron${viewsOpen ? ' src-chevron-open' : ''}`}>›</span>
+                      </button>
+                      <div className={`src-collapsible-body-wrap${viewsOpen ? '' : ' collapsed'}`}>
+                        <div>
+                          <div className="src-collapsible-body">
+                            <label className="src-table-item src-table-item-selall" onClick={(e) => e.stopPropagation()}>
+                              <input
+                                type="checkbox"
+                                className="src-check"
+                                checked={selectedViews.size === viewList.length}
+                                onChange={(e) => setSelectedViews(e.target.checked ? new Set(viewList) : new Set())}
+                              />
+                              Select all
+                            </label>
+                            {viewList.map((v) => (
+                              <label key={v} className="src-table-item src-table-item-check" onClick={(e) => e.stopPropagation()}>
+                                <input
+                                  type="checkbox"
+                                  className="src-check"
+                                  checked={selectedViews.has(v)}
+                                  onChange={(e) => setSelectedViews((prev) => {
+                                    const next = new Set(prev);
+                                    e.target.checked ? next.add(v) : next.delete(v);
+                                    return next;
+                                  })}
+                                />
+                                {v}
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="src-drawer-foot">
+              {isConnected && (
+                <button className="btn src-disconnect-btn" onClick={handleDisconnect}>
+                  Disconnect
+                </button>
+              )}
+              <div style={{ flex: 1 }} />
+              <button className="btn" onClick={() => setDrawerTarget(null)}>Cancel</button>
+              <button className="btn btn-primary" onClick={handleSave}>
+                {isConnected ? 'Update' : 'Connect'}
+              </button>
+            </div>
+            </>
+          )}
+        </div>
+
+        {/* ── List pane (slides out to left) ─────── */}
+        <div className={`src-pane src-pane-list${drawerTarget ? ' src-pane-out' : ''}`}>
+          <div className="src-drawer-hd">
+            <div className="src-drawer-title">Data Sources</div>
+            <button className="src-close-btn" onClick={onClose}>×</button>
+          </div>
+
+          <div className="src-search-bar">
+            <svg className="src-search-icon" viewBox="0 0 20 20" fill="none">
+              <circle cx="8.5" cy="8.5" r="5" stroke="currentColor" strokeWidth="1.5"/>
+              <path d="M13 13l3.5 3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+            </svg>
+            <input
+              className="src-search-input"
+              type="text"
+              placeholder="Search data sources…"
+              value={drawerSearch}
+              onChange={(e) => setDrawerSearch(e.target.value)}
+              autoComplete="off"
+            />
+            {drawerSearch && (
+              <button className="src-search-clear" onClick={() => setDrawerSearch('')}>×</button>
+            )}
+          </div>
+
+          <div className="src-drawer-body">
+            {/* Connected section */}
+            {filteredConnectedList.length > 0 && (
+              <div className="src-list-section">
+                <div className="src-section-lbl">Connected</div>
+                {filteredConnectedList.map((item) => (
+                  <button
+                    key={item.id}
+                    className="src-row src-row-connected"
+                    onClick={() => setDrawerTarget(item.id)}
+                  >
+                    <ConnectorAvatar id={item.id} name={item.name} size={32} />
+                    <div className="src-row-info">
+                      <div className="src-row-name">{item.name}</div>
+                      {item.dbType && <div className="src-row-sub">{item.dbType}</div>}
+                    </div>
+                    <svg className="src-connected-check" viewBox="0 0 16 16" aria-label="Connected"><circle cx="8" cy="8" r="8" fill="#16a34a"/><path d="M4.5 8.5l2.5 2.5 4.5-5" stroke="#fff" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" fill="none"/></svg>
+                    <span className="src-row-chevron">›</span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Available groups */}
+            {CONNECTOR_CATEGORIES.map((cat) => {
+              const availableItems = cat.items.filter((item) => {
+                if (connectedSources.has(item.id)) return false;
+                if (drawerSearch) return item.name.toLowerCase().includes(searchLower);
+                return true;
+              });
+              if (availableItems.length === 0) return null;
+              return (
+                <div key={cat.category} className="src-list-section">
+                  <div className="src-section-lbl">{cat.category}</div>
+                  {availableItems.map((item) => (
+                    <div key={item.id} className="src-row src-row-available">
+                      <ConnectorAvatar id={item.id} name={item.name} size={32} />
+                      <div className="src-row-info">
+                        <div className="src-row-name">{item.name}</div>
+                      </div>
+                      <button
+                        className="src-row-connect-btn"
+                        onClick={() => setDrawerTarget(item.id)}
+                      >
+                        Connect
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+
+            {/* Empty state */}
+            {drawerSearch && filteredConnectedList.length === 0 &&
+              CONNECTOR_CATEGORIES.every((cat) =>
+                cat.items.every((item) => connectedSources.has(item.id) || !item.name.toLowerCase().includes(searchLower))
+              ) && (
+              <div className="src-search-empty">No data sources match "<strong>{drawerSearch}</strong>"</div>
+            )}
+          </div>
+        </div>
+
+      </aside>
+    </>
   );
 }
 
