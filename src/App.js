@@ -1,6 +1,7 @@
 import { Dialog } from './components/ui/dialog';
 import { ChevronDown, PanelLeftOpen } from 'lucide-react';
 import { Menu } from './components/ui/menu';
+import PillList from './components/PillList';
 import { Select } from './components/ui/select';
 import { Switch } from './components/ui/switch';
 import { Tabs } from './components/ui/tabs';
@@ -12,6 +13,10 @@ import {
   useReactFlow, ReactFlowProvider, useStore, useNodesState,
 } from '@xyflow/react';
 import Dagre from '@dagrejs/dagre';
+import HomeView from './components/HomeView';
+import EditorLeftPane from './components/EditorLeftPane';
+import EditPane from './components/EditPane';
+import MetricsFormulaEditor from './components/MetricsFormulaEditor';
 import './App.css';
 
 // ── Source brand colors ──────────────────────────────────────────────────────
@@ -159,8 +164,8 @@ const DATASETS_INITIAL = {
 const METRICS_INITIAL = [
   { id: 'total-revenue',  name: 'Total Revenue',         description: 'Sum of gross order revenue across all orders in the dataset.', datasetId: 'sales-overview',  expression: 'SUM(amount)',              aggregation: 'SUM', isGlobal: false },
   { id: 'net-revenue',    name: 'Net Revenue',           description: 'Sum of revenue after deducting discounts and unit cost.',      datasetId: 'sales-overview',  expression: 'SUM(revenue_net)',         aggregation: 'SUM', isGlobal: false },
-  { id: 'aov',            name: 'Average Order Value',   description: 'Average gross revenue per order. Divide total revenue by distinct order count.', datasetId: 'sales-overview', expression: 'SUM(amount) / COUNT(DISTINCT order_id)', aggregation: 'DERIVED', isGlobal: false },
-  { id: 'return-rate',    name: 'Return Rate',           description: 'Percentage of orders that resulted in a return.',             datasetId: 'revenue-summary', expression: 'COUNT(return_id) / COUNT(DISTINCT order_id)', aggregation: 'DERIVED', isGlobal: false },
+  { id: 'aov',            name: 'Average Order Value',   description: 'Average gross revenue per order. Divide total revenue by distinct order count.', datasetId: 'sales-overview', expression: 'SUM(amount) / COUNT(DISTINCT order_id)', aggregation: 'FORMULA', isGlobal: false },
+  { id: 'return-rate',    name: 'Return Rate',           description: 'Percentage of orders that resulted in a return.',             datasetId: 'revenue-summary', expression: 'COUNT(return_id) / COUNT(DISTINCT order_id)', aggregation: 'FORMULA', isGlobal: false },
 ];
 
 // Legacy alias — keeps the existing editor/inspect view working unchanged
@@ -222,6 +227,67 @@ const PREVIEW_ROWS = [
   { order_id: 10042, customer_id: null, product_id: 302, order_date: '2025-03-02', amount: '$320', revenue_net: '$210', full_name: null, region: null, segment: null, product_name: 'Starter Pack', category: 'Licenses', unit_cost: '$110' },
   { order_id: 10043, customer_id: 203, product_id: 303, order_date: '2025-03-02', amount: '$1,200', revenue_net: '$940', full_name: 'Carlos Vega', region: 'LATAM', segment: 'Mid-Market', product_name: 'Enterprise Suite', category: 'Licenses', unit_cost: '$260' },
 ];
+
+// Evaluate a metric expression against preview rows, returning a numeric value or null.
+// Handles SUM, COUNT, COUNT(DISTINCT ...), AVG over fields present in rows.
+function computeMetricValue(expression, rows) {
+  if (!expression || !rows.length) return null;
+  // Parse a field value from a row cell: strip $ and commas, return number
+  const parseVal = (v) => {
+    if (v === null || v === undefined) return null;
+    const n = parseFloat(String(v).replace(/[$,]/g, ''));
+    return isNaN(n) ? null : n;
+  };
+
+  let expr = expression;
+
+  // COUNT(DISTINCT field)
+  expr = expr.replace(/COUNT\s*\(\s*DISTINCT\s+(\w+)\s*\)/gi, (_, field) => {
+    const vals = rows.map((r) => r[field]).filter((v) => v !== null && v !== undefined);
+    return new Set(vals).size;
+  });
+  // SUM(field)
+  expr = expr.replace(/SUM\s*\(\s*(\w+)\s*\)/gi, (_, field) => {
+    if (!(field in rows[0])) return 'null';
+    const total = rows.reduce((acc, r) => {
+      const v = parseVal(r[field]);
+      return v === null ? acc : acc + v;
+    }, 0);
+    return total;
+  });
+  // AVG(field)
+  expr = expr.replace(/AVG\s*\(\s*(\w+)\s*\)/gi, (_, field) => {
+    if (!(field in rows[0])) return 'null';
+    const vals = rows.map((r) => parseVal(r[field])).filter((v) => v !== null);
+    return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 'null';
+  });
+  // COUNT(field)
+  expr = expr.replace(/COUNT\s*\(\s*(\w+)\s*\)/gi, (_, field) => {
+    return rows.filter((r) => r[field] !== null && r[field] !== undefined).length;
+  });
+
+  // If any aggregate couldn't be resolved (field missing → 'null' sentinel)
+  if (/\bnull\b/.test(expr)) return null;
+
+  // Safety: only allow numeric expressions before eval
+  if (!/^[\d\s+\-*/.()]+$/.test(expr)) return null;
+
+  // eslint-disable-next-line no-eval
+  return eval(expr);
+}
+
+function formatMetricValue(value, expression, isCurrency) {
+  if (value === null || value === undefined) return '—';
+  if (isCurrency) {
+    return '$' + Math.round(value).toLocaleString();
+  }
+  // Ratio / percentage: result ≤ 1 and expression contains division
+  if (expression.includes('/') && Math.abs(value) <= 1) {
+    return (value * 100).toFixed(1) + '%';
+  }
+  // Default: locale number, up to 1 decimal
+  return value % 1 === 0 ? value.toLocaleString() : value.toFixed(1);
+}
 
 const JOIN_MAP = { INNER: 'INNER JOIN', LEFT: 'LEFT JOIN', RIGHT: 'RIGHT JOIN', FULL: 'FULL OUTER JOIN', LEFT_EXCL: 'LEFT JOIN', RIGHT_EXCL: 'RIGHT JOIN' };
 
@@ -1744,7 +1810,7 @@ function DsFieldPopoverLayer() {
   );
 }
 
-function DatasetInspectView({ entities, joins }) {
+function DatasetInspectView({ entities, joins, metrics = [], onAddMetric, onInspectMetric, onEditMetric, onRemoveMetric }) {
   const joinList = Object.values(joins);
   return (
     <div className="ds-inspect-view">
@@ -1810,39 +1876,105 @@ function DatasetInspectView({ entities, joins }) {
 
         {joinList.length > 0 && (
           <div className="insp-section">
-            <h3 className="insp-section-hd" style={{ marginTop: 0 }}>Relationships</h3>
+            <div className="insp-section-head-row">
+              <h3 className="insp-section-hd" style={{ marginTop: 0 }}>Joins</h3>
+              <span className="insp-section-sub">SQL execution — how these models are combined at query time</span>
+            </div>
             <div className="insp-cards-row">
-              {joinList.map((join) => (
-                <article className="join-block" key={join.id}>
-                  <header className="join-block-hd">
-                    <span className="join-name">{join.fromEntity} → {join.toEntity}</span>
-                    {join.cardinality && (
-                      <span className="join-cardinality-tag">{join.cardinality}</span>
+              {joinList.map((join) => {
+                const sqlKeyword = JOIN_MAP[join.type] ?? join.type.replace(/_/g, ' ');
+                return (
+                  <article className="join-block" key={join.id}>
+                    <header className="join-block-hd">
+                      <span className="join-name">{join.fromEntity} → {join.toEntity}</span>
+                      {join.cardinality && (
+                        <span className="join-cardinality-tag">{join.cardinality}</span>
+                      )}
+                    </header>
+                    <div className="join-block-sql-row">
+                      <code className="join-sql-kw">{sqlKeyword}</code>
+                      <span className="join-sql-on">ON <code className="join-sql-expr">{join.from} = {join.to}</code></span>
+                    </div>
+                    {join.desc && (
+                      <div className="join-row"><p className="join-desc">{join.desc}</p></div>
                     )}
-                  </header>
-                  <div className="join-row">
-                    <p className="join-keys">
-                      {JOIN_TYPES.find((t) => t.value === join.type)?.label ?? join.type}
-                      {' · '}
-                      Match on <code className="mono">{join.from}</code> = <code className="mono">{join.to}</code>
-                    </p>
+                  </article>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ── Metrics ── */}
+        <div className="insp-section">
+          <div className="insp-section-head-row">
+            <h3 className="insp-section-hd" style={{ marginTop: 0 }}>Metrics</h3>
+            {onAddMetric && (
+              <button className="plain-btn ds-metric-add-btn" onClick={onAddMetric}>
+                + Add metric
+              </button>
+            )}
+          </div>
+          {metrics.length === 0 ? (
+            <div className="ds-metrics-empty">
+              <p>No metrics defined for this dataset yet.</p>
+            </div>
+          ) : (
+            <div className="insp-cards-row">
+              {metrics.map((metric) => (
+                <article
+                  key={metric.id}
+                  className="ds-metric-card"
+                  onClick={() => onInspectMetric && onInspectMetric(metric.id)}
+                  role={onInspectMetric ? 'button' : undefined}
+                  tabIndex={onInspectMetric ? 0 : undefined}
+                  onKeyDown={onInspectMetric ? (e) => { if (e.key === 'Enter') onInspectMetric(metric.id); } : undefined}
+                >
+                  <div className="ds-metric-card-top">
+                    <span className="ds-metric-name">{metric.name}</span>
+                    <div className="ds-metric-card-top-actions">
+                      <span className="ds-metric-agg-badge">{metric.aggregation}</span>
+                      {onRemoveMetric && (
+                        <button
+                          className="plain-btn ds-metric-remove-btn"
+                          onClick={(e) => { e.stopPropagation(); onRemoveMetric(metric.id); }}
+                          title="Remove from dataset"
+                          aria-label="Remove metric from dataset"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
                   </div>
-                  {join.desc && (
-                    <div className="join-row"><p className="join-desc">{join.desc}</p></div>
+                  {metric.description && (
+                    <p className="ds-metric-desc">{metric.description}</p>
+                  )}
+                  {metric.expression && (
+                    <code className="ds-metric-expr">{metric.expression}</code>
+                  )}
+                  {onEditMetric && (
+                    <button
+                      className="plain-btn ds-metric-edit-btn"
+                      onClick={(e) => { e.stopPropagation(); onEditMetric(metric.id); }}
+                      title="Edit metric"
+                    >
+                      Edit
+                    </button>
                   )}
                 </article>
               ))}
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
 function DatasetCanvasPaneInner({
-  dataset, dataModels, isEditing, editDraft, setEditDraft,
+  dataset, dataModels, metrics = [], isEditing, editDraft, setEditDraft,
   onEdit, onCancel, onSave, onOpenAddModel, onNavigateToModel,
+  onAddMetric, onInspectMetric, onEditMetric, onRemoveMetric,
 }) {
   const { fitView } = useReactFlow();
 
@@ -1947,8 +2079,10 @@ function DatasetCanvasPaneInner({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeEntities.length]);
 
-  const buildNodes = useCallback(() =>
-    activeEntities.map((e) => ({
+  const datasetMetrics = metrics.filter((m) => m.datasetId === dataset.id);
+
+  const buildNodes = useCallback(() => {
+    const entityNodes = activeEntities.map((e) => ({
       id: e.id,
       type: 'dsEntity',
       position: positions[e.id] ?? { x: 100, y: 100 },
@@ -1962,16 +2096,43 @@ function DatasetCanvasPaneInner({
           setEditDraft((prev) => ({ ...prev, modelIds: (prev.modelIds ?? []).filter((id) => id !== e.id) }));
         } : null,
       },
-    })),
+    }));
+
+    if (datasetMetrics.length > 0) {
+      // Position metrics box below the entity row
+      const allY = Object.values(positions).map((p) => p.y);
+      const allH = activeEntities.map((e) => ENTITY_HEADER_HEIGHT + e.fields.length * ENTITY_ROW_HEIGHT + ENTITY_FOOTER_HEIGHT);
+      const maxBottom = allY.length > 0 ? Math.max(...allY.map((y, i) => y + (allH[i] ?? 0))) : 0;
+      const metricsY = maxBottom > 0 ? maxBottom + 40 : 100;
+      const metricsX = positions[activeEntities[0]?.id]?.x ?? 60;
+
+      entityNodes.push({
+        id: '__metrics__',
+        type: 'dsMetrics',
+        position: positions['__metrics__'] ?? { x: metricsX, y: metricsY },
+        dragHandle: '.ec-hd',
+        data: {
+          metrics: datasetMetrics,
+          isEditing,
+          onRemove: isEditing ? (id) => onRemoveMetric && onRemoveMetric(id) : null,
+          onInspect: (id) => onInspectMetric && onInspectMetric(id),
+          onEdit: isEditing ? (id) => onEditMetric && onEditMetric(id) : null,
+          onAdd: isEditing ? () => onAddMetric && onAddMetric() : null,
+        },
+      });
+    }
+
+    return entityNodes;
+  },
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  [activeEntities, positions, isEditing]);
+  [activeEntities, positions, isEditing, datasetMetrics.length]);
 
   const [rfNodes, setRfNodes, onNodesChange] = useNodesState(() => buildNodes());
 
   useEffect(() => {
     setRfNodes(buildNodes());
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeEntities.length, isEditing, positions]);
+  }, [activeEntities.length, isEditing, positions, datasetMetrics.length]);
 
   const onNodeDragStop = useCallback((_, node) => {
     if (!isEditing) return;
@@ -1982,59 +2143,62 @@ function DatasetCanvasPaneInner({
     instance.fitView({ padding: 0.18, duration: 0, maxZoom: 1 });
   }, []);
 
+  const handleAutoArrange = useCallback(() => {
+    const newPos = computePositions(activeEntities, joins);
+    setPositions(newPos);
+    setTimeout(() => fitView({ padding: 0.18, duration: 300, maxZoom: 1 }), 80);
+  }, [computePositions, activeEntities, joins, fitView]);
+
   const stageBadgeClass = {
     draft: 'badge-draft',
     dev: 'badge-dev',
+    development: 'badge-dev',
+    testing: 'badge-testing',
     production: 'badge-prod',
   }[dataset.stage] || 'badge-draft';
+
+  const STAGE_OPTIONS = ['draft', 'development', 'testing', 'production'];
 
   return (
     <div className="ds-canvas-pane">
       {/* Header */}
       <div className="ds-canvas-header">
-        <div className="dm-header-left">
-          {isEditing ? (
+        {isEditing ? (
+          <div className="ds-header-edit-row">
             <input
-              className="dm-name-input ds-name-input"
+              className="ds-name-input"
               value={editDraft.name}
               onChange={(e) => setEditDraft((p) => ({ ...p, name: e.target.value }))}
               autoFocus
             />
-          ) : (
+            <select
+              className={`ds-stage-select ds-stage-select-${editDraft.stage ?? 'draft'}`}
+              value={editDraft.stage ?? 'draft'}
+              onChange={(e) => setEditDraft((p) => ({ ...p, stage: e.target.value }))}
+            >
+              {STAGE_OPTIONS.map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+          </div>
+        ) : (
+          <div className="ds-header-title-row">
             <h2 className="dm-title">{dataset.name}</h2>
-          )}
-          <span className={`dm-source-label badge ${stageBadgeClass}`}>{dataset.stage}</span>
-        </div>
-        <div className="dm-header-actions">
-          {isEditing ? (
-            <>
-              <button className="btn" onClick={onCancel}>Cancel</button>
-              <button className="btn btn-primary" onClick={() => onSave(editDraft)}>Save</button>
-            </>
-          ) : (
-            <button className="btn btn-primary" onClick={onEdit}>Edit</button>
-          )}
-        </div>
+            <span className={`badge ${stageBadgeClass}`}>{dataset.stage}</span>
+          </div>
+        )}
+        {/* Description */}
+        {isEditing ? (
+          <textarea
+            className="ds-desc-ta-edit"
+            value={editDraft.desc ?? ''}
+            onChange={(e) => setEditDraft((p) => ({ ...p, desc: e.target.value }))}
+            placeholder="Describe this dataset for AI and collaborators…"
+          />
+        ) : (
+          dataset.desc && <p className="dm-desc ds-desc">{dataset.desc}</p>
+        )}
       </div>
-
-      {/* Description */}
-      {isEditing ? (
-        <textarea
-          className="dm-desc-ta ds-desc-ta"
-          value={editDraft.desc ?? ''}
-          onChange={(e) => setEditDraft((p) => ({ ...p, desc: e.target.value }))}
-          placeholder="Describe this dataset for AI and collaborators…"
-        />
-      ) : (
-        dataset.desc && <p className="dm-desc ds-desc">{dataset.desc}</p>
-      )}
-
-      {/* Unsaved-change banner (edit mode notice) */}
-      {isEditing && (
-        <div className="ds-edit-banner">
-          <span>Edit mode — changes are not saved until you click Save.</span>
-        </div>
-      )}
 
       {/* Canvas (edit mode) / Inspect view (readonly) */}
       {isEditing ? (
@@ -2066,8 +2230,8 @@ function DatasetCanvasPaneInner({
             </ReactFlow>
             <DsFieldPopoverLayer />
             <div className="canvas-float-layer" aria-hidden="false">
-              <button className="float-btn float-left ds-add-model-btn" onClick={onOpenAddModel}>
-                + Add Data Model
+              <button className="float-btn float-auto-arrange" onClick={handleAutoArrange}>
+                Auto arrange
               </button>
             </div>
           </div>
@@ -2089,7 +2253,6 @@ function DatasetCanvasPaneInner({
                 </div>
                 <h3 className="empty-state-title">Add your first Data Model</h3>
                 <p className="empty-state-desc">Start by adding a Data Model to this dataset. You can then define joins between models to build a queryable structure.</p>
-                <button className="btn btn-primary" onClick={onOpenAddModel}>+ Add Data Model</button>
               </div>
             </div>
           )}
@@ -2107,12 +2270,19 @@ function DatasetCanvasPaneInner({
               </svg>
             </div>
             <h3 className="empty-state-title">No Data Models configured</h3>
-            <p className="empty-state-desc">This dataset doesn't have any Data Models yet. Switch to Edit mode to add models and define their relationships.</p>
-            <button className="btn" onClick={onEdit}>Edit dataset</button>
+            <p className="empty-state-desc">This dataset doesn't have any Data Models yet. Switch to Edit mode to add models and configure how they join.</p>
           </div>
         </div>
       ) : (
-        <DatasetInspectView entities={activeEntities} joins={joins} />
+        <DatasetInspectView
+          entities={activeEntities}
+          joins={joins}
+          metrics={metrics.filter((m) => m.datasetId === dataset.id)}
+          onAddMetric={isEditing ? onAddMetric : undefined}
+          onInspectMetric={onInspectMetric}
+          onEditMetric={isEditing ? onEditMetric : undefined}
+          onRemoveMetric={isEditing ? onRemoveMetric : undefined}
+        />
       )}
 
       {/* Preview panel */}
@@ -2264,7 +2434,51 @@ function DsEntityCardNode({ id, data }) {
   );
 }
 
-const dsNodeTypes = { dsEntity: DsEntityCardNode };
+const dsNodeTypes = { dsEntity: DsEntityCardNode, dsMetrics: DsMetricsBoxNode };
+
+function DsMetricsBoxNode({ data }) {
+  const { metrics, isEditing, onRemove, onInspect } = data;
+  return (
+    <article className="ds-metrics-box">
+      <header className="ds-metrics-box-hd ec-hd">
+        <span className="ec-name">Metrics</span>
+        <span className="ds-metrics-box-count">{metrics.length}</span>
+      </header>
+      <div className="ds-metrics-box-rows">
+        {metrics.map((m) => (
+          <div key={m.id} className="ds-metrics-box-row nodrag nopan">
+            <button
+              className="plain-btn ds-metrics-box-name"
+              onClick={() => onInspect && onInspect(m.id)}
+              title={m.expression || m.name}
+            >
+              {m.name}
+            </button>
+            <span className="ds-metric-agg-badge">{m.aggregation}</span>
+            {isEditing && onRemove && (
+              <button
+                className="plain-btn ds-metrics-box-remove-btn nodrag nopan"
+                onClick={() => onRemove(m.id)}
+                title="Remove from dataset"
+                aria-label="Remove metric"
+              >
+                ×
+              </button>
+            )}
+          </div>
+        ))}
+        {isEditing && (
+          <button
+            className="plain-btn ds-metrics-box-add-btn nodrag nopan"
+            onClick={() => data.onAdd && data.onAdd()}
+          >
+            + Add metric
+          </button>
+        )}
+      </div>
+    </article>
+  );
+}
 
 function DatasetCanvasPane(props) {
   return (
@@ -2610,10 +2824,11 @@ function MetricListItem({ metric, selected, onClick }) {
 }
 
 // ── Data Model detail pane ───────────────────────────────────────────────────
-function DataModelDetail({ model, isEditing, editDraft, setIsEditing, setEditDraft, onSave, onCancel }) {
+function DataModelDetail({ model, isEditing, editDraft, setIsEditing, setEditDraft, onSave, onCancel, inPane = false }) {
   const [fieldSearch, setFieldSearch] = useState('');
   const [calcModalOpen, setCalcModalOpen] = useState(false);
   const [calcEditTarget, setCalcEditTarget] = useState(null); // field being edited
+  const [stableKeyUnlocked, setStableKeyUnlocked] = useState(false);
   if (!model) return null;
 
   const active = isEditing ? editDraft : model;
@@ -2643,58 +2858,102 @@ function DataModelDetail({ model, isEditing, editDraft, setIsEditing, setEditDra
 
   return (
     <div className="dm-detail">
-      {/* Header */}
-      <div className="dm-header">
-        <div className="dm-header-left">
-          {isEditing ? (
-            <input
-              className="dm-name-input"
-              value={editDraft.name}
-              onChange={(e) => setEditDraft((p) => ({ ...p, name: e.target.value }))}
-              autoFocus
-            />
-          ) : (
-            <h2 className="dm-title">{model.name}</h2>
-          )}
-          <span className="dm-source-label" style={{ color: sourceBrandColor(model.sourceId) }}>{model.sourceName}</span>
+      {/* Header — hidden when rendered inside EditPane (which provides its own header) */}
+      {!inPane && (
+        <div className="dm-header">
+          <div className="dm-header-left">
+            <div className="dm-title-row">
+              {isEditing ? (
+                <input
+                  className="dm-name-input"
+                  value={editDraft.name}
+                  onChange={(e) => setEditDraft((p) => ({ ...p, name: e.target.value }))}
+                  autoFocus
+                />
+              ) : (
+                <h2 className="dm-title">{model.name}</h2>
+              )}
+              {/* Stable key inline with title */}
+              <span className="dm-stable-key-row">
+                <span className="dm-stable-key-icon" title="Stable key">🔑</span>
+                {isEditing ? (
+                  <>
+                    <input
+                      className="dm-sk-input dm-sk-header"
+                      value={editDraft.stableKey || autoStableKey(editDraft)}
+                      readOnly={!stableKeyUnlocked}
+                      onChange={(e) => setEditDraft((p) => ({ ...p, stableKey: e.target.value }))}
+                      spellCheck={false}
+                    />
+                    <button
+                      className="plain-btn dm-sk-lock-btn"
+                      title={stableKeyUnlocked ? 'Lock key' : 'Unlock to edit'}
+                      onClick={() => {
+                        if (!stableKeyUnlocked) {
+                          // eslint-disable-next-line no-alert
+                          if (window.confirm('Changing the stable key may break existing integrations. Continue?')) {
+                            setStableKeyUnlocked(true);
+                          }
+                        } else {
+                          setStableKeyUnlocked(false);
+                        }
+                      }}
+                    >
+                      {stableKeyUnlocked ? '🔓' : '🔒'}
+                    </button>
+                  </>
+                ) : (
+                  <span className="dm-stable-key-val">{model.stableKey || autoStableKey(model)} <span className="dm-sk-lock">🔒</span></span>
+                )}
+              </span>
+            </div>
+            <span className="dm-source-label" style={{ color: sourceBrandColor(model.sourceId) }}>{model.sourceName}</span>
+          </div>
+          <div className="dm-header-actions">
+            {isEditing ? (
+              <>
+                <button className="btn" onClick={onCancel}>Cancel</button>
+                <button className="btn btn-primary" onClick={() => onSave(editDraft)}>Save</button>
+              </>
+            ) : (
+              <button className="btn" onClick={handleEdit}>Edit</button>
+            )}
+          </div>
         </div>
-        <div className="dm-header-actions">
-          {isEditing ? (
-            <>
-              <button className="btn" onClick={onCancel}>Cancel</button>
-              <button className="btn btn-primary" onClick={() => onSave(editDraft)}>Save</button>
-            </>
-          ) : (
-            <button className="btn" onClick={handleEdit}>Edit</button>
-          )}
-        </div>
-      </div>
-
-      {/* Description */}
-      {isEditing ? (
-        <textarea
-          className="dm-desc-ta"
-          value={editDraft.description}
-          onChange={(e) => setEditDraft((p) => ({ ...p, description: e.target.value }))}
-          placeholder="Describe this model for AI and collaborators…"
-        />
-      ) : (
-        <p className="dm-desc">{model.description}</p>
       )}
 
-      {/* Grain */}
-      <div className="dm-grain-row">
-        <span className="dm-grain-lbl">Grain</span>
-        {isEditing ? (
-          <input
-            className="dm-grain-input"
-            value={editDraft.grain || ''}
-            onChange={(e) => setEditDraft((p) => ({ ...p, grain: e.target.value }))}
-            placeholder="e.g. One row per order line item"
-          />
-        ) : (
-          <span className="dm-grain-val">{active.grain || <span className="dm-grain-empty">Not set</span>}</span>
-        )}
+
+      {/* Model meta grid: Description (50%), Row represents (25%), Stable key (25%) */}
+      <div className="dm-model-meta-grid">
+        {/* Description */}
+        <div className="dm-section dm-meta-desc">
+          <span className="dm-lbl">Description</span>
+          {isEditing ? (
+            <textarea
+              className="dm-desc-ta"
+              value={editDraft.description}
+              onChange={(e) => setEditDraft((p) => ({ ...p, description: e.target.value }))}
+              placeholder="Describe this model for AI and collaborators…"
+            />
+          ) : (
+            <p className="dm-desc" style={{ margin: 0 }}>{model.description}</p>
+          )}
+        </div>
+        {/* Row represents (grain) */}
+        <div className="dm-section dm-meta-grain">
+          <span className="dm-section-lbl" data-tooltip="What does one row in this model mean?">Row represents</span>
+          {isEditing ? (
+            <input
+              className="dm-grain-input"
+              value={editDraft.grain || ''}
+              onChange={(e) => setEditDraft((p) => ({ ...p, grain: e.target.value }))}
+              placeholder="e.g. One row per order line item"
+            />
+          ) : (
+            <span className="dm-grain-val">{active.grain || <span className="dm-grain-empty">Not set</span>}</span>
+          )}
+        </div>
+
       </div>
 
       {/* Fields section header */}
@@ -2777,6 +3036,50 @@ function DataModelDetail({ model, isEditing, editDraft, setIsEditing, setEditDra
           setCalcEditTarget(null);
         }}
       />
+
+      {/* Semantic Relationships — FK fields that link to other entities */}
+      {(() => {
+        const fkFields = active.fields.filter(
+          (f) => !f.isKey && f.role === 'DIMENSION' && f.key.endsWith('_id')
+        );
+        if (fkFields.length === 0) return null;
+        return (
+          <div className="dm-rel-section">
+            <div className="dm-rel-header">
+              <span className="dm-fields-title">Relationships</span>
+              <span className="dm-rel-subtitle">Semantic links to other entities via foreign key fields</span>
+            </div>
+            <div className="dm-rel-list">
+              {fkFields.map((field) => {
+                const refEntityId = field.key.replace(/_id$/, '');
+                const refEntityLabel = refEntityId
+                  .split('_')
+                  .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+                  .join(' ');
+                return (
+                  <div className="dm-rel-item" key={field.key}>
+                    <div className="dm-rel-row">
+                      <div className="dm-rel-side">
+                        <span className="dm-rel-entity-name">{active.name}</span>
+                        <code className="dm-rel-field">{field.key}</code>
+                      </div>
+                      <span className="dm-rel-arrow" aria-hidden="true">→</span>
+                      <div className="dm-rel-side">
+                        <span className="dm-rel-entity-name">{refEntityLabel}</span>
+                        <code className="dm-rel-field">{refEntityId}_id</code>
+                      </div>
+                    </div>
+                    <span className="dm-rel-cardinality">many : 1</span>
+                    {field.semanticDesc && (
+                      <p className="dm-rel-desc">{field.semanticDesc}</p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -2861,9 +3164,12 @@ function DataModelFieldRow({ field, isEditing, onToggleVisible, onUpdateField, o
           />
         ) : (
           <div className="dm-synonym-pills">
-            {(field.synonyms || '').split(',').map((s) => s.trim()).filter(Boolean).map((s) => (
-              <span key={s} className="synonym-tag">{s}</span>
-            ))}
+            <PillList
+              items={(field.synonyms || '').split(',').map((s) => s.trim()).filter(Boolean).map((s) => ({ id: s, label: s }))}
+              pillClass="synonym-tag"
+              moreClass="synonym-tag synonym-tag-more"
+              containerClass="dm-synonym-pills"
+            />
           </div>
         )}
       </td>
@@ -2913,8 +3219,104 @@ function DataModelFieldRow({ field, isEditing, onToggleVisible, onUpdateField, o
   );
 }
 
+// ── Stable key helper ─────────────────────────────────────────────────────────
+function slugify(str) {
+  return (str || '')
+    .toLowerCase()
+    .replace(/\s+/g, '_')
+    .replace(/[^a-z0-9_]/g, '')
+    .slice(0, 64);
+}
+function autoStableKey(model) {
+  return slugify(model.sourceName || '') + '_' + slugify(model.name || '');
+}
+
+// ── Nav dataset combo (trigger + filterable dropdown) ────────────────────────
+function DatasetCombo({ datasets, selectedObjectId, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState('');
+  const ref = useRef(null);
+
+  const allDatasets = [...datasets.draft, ...datasets.dev, ...datasets.production];
+  const selected = allDatasets.find((d) => d.id === selectedObjectId);
+  const filtered = filter.trim()
+    ? allDatasets.filter((d) => d.name.toLowerCase().includes(filter.trim().toLowerCase()))
+    : allDatasets;
+
+  const stageCls = (stage) => stage === 'production' ? 'prod' : stage === 'dev' ? 'dev' : 'draft';
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) {
+        setOpen(false);
+        setFilter('');
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  const handleSelect = (id) => {
+    onChange(id);
+    setOpen(false);
+    setFilter('');
+  };
+
+  return (
+    <div className="nav-ds-combo" ref={ref}>
+      <button
+        className={`nav-ds-trigger${open ? ' open' : ''}`}
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        <span className="nav-ds-trigger-name">{selected ? selected.name : 'Select a dataset…'}</span>
+        {selected && (
+          <span className={`nav-ds-trigger-badge badge badge-${stageCls(selected.stage)}`}>
+            {selected.stage}
+          </span>
+        )}
+        <svg className="nav-ds-trigger-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      {open && (
+        <div className="nav-ds-dropdown" role="listbox">
+          <div className="nav-ds-search-wrap">
+            <input
+              className="nav-ds-search"
+              placeholder="Filter datasets…"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              autoFocus
+            />
+          </div>
+          <div className="nav-ds-list">
+            {filtered.length === 0 && (
+              <div className="nav-ds-empty">No matches</div>
+            )}
+            {filtered.map((ds) => (
+              <button
+                key={ds.id}
+                className={`nav-ds-option${ds.id === selectedObjectId ? ' selected' : ''}`}
+                onClick={() => handleSelect(ds.id)}
+                role="option"
+                aria-selected={ds.id === selectedObjectId}
+              >
+                <span className="nav-ds-option-name">{ds.name}</span>
+                <span className={`nav-ds-option-badge badge badge-${stageCls(ds.stage)}`}>{ds.stage}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function App() {
-  const [view, setView] = useState('catalog');
+  const [view, setView] = useState('home');
   // eslint-disable-next-line no-unused-vars
   const [search] = useState('');
   const [stage, setStage] = useState('dev');
@@ -2973,8 +3375,16 @@ function App() {
   const [editDraft, setEditDraft] = useState(null);
   const [dataModels, setDataModels] = useState(DATA_MODELS_INITIAL);
   const [datasets, setDatasets] = useState(DATASETS_INITIAL);
-  const [metrics] = useState(METRICS_INITIAL);
+  const [metrics, setMetrics] = useState(METRICS_INITIAL);
   const [addModelOpen, setAddModelOpen] = useState(false);
+
+  // ── Edit pane (right sliding overlay) ─────────────────────────────────────
+  // item: { type: 'model' | 'metric', id: string | null, mode: 'edit' | 'inspect' }
+  const [editPaneItem, setEditPaneItem] = useState(null);
+  const [editPaneCaretY, setEditPaneCaretY] = useState(null);
+  const [editPaneDraft, setEditPaneDraft] = useState(null);
+  const catalogPaneRef = useRef(null);
+  const lpContainerRef = useRef(null);
 
   // Add data source modal state
   const [addSourceOpen, setAddSourceOpen] = useState(false);
@@ -3272,7 +3682,7 @@ function App() {
             name,
             label: titleCase(name.replace(/_/g, ' ')),
             model: "ref('sales_overview')",
-            calculation_method: f.calc ? 'derived' : (DBT_AGG_MAP[f.agg] || 'sum'),
+            calculation_method: f.calc ? 'formula' : (DBT_AGG_MAP[f.agg] || 'sum'),
             expression: f.key,
             ...(f.calc && fieldFormulas[f.key] ? { formula: fieldFormulas[f.key] } : {}),
             ...(desc ? { description: desc } : {}),
@@ -3479,6 +3889,114 @@ function App() {
     resetAddSourceState();
   };
 
+  // ── New dataset handler ───────────────────────────────────────────────────
+  const handleNewDataset = () => {
+    const id = `dataset-${Date.now()}`;
+    const stub = { id, name: 'New Dataset', desc: '', entities: 0, joins: 0, uses: 0, stage: 'draft', progress: 0, modelIds: [] };
+    setDatasets((prev) => ({ ...prev, draft: [...prev.draft, stub] }));
+    setSelectedObjectId(id);
+    setSelectedObjectType('datasets');
+    setIsEditing(false);
+    setEditDraft(null);
+    setView('catalog');
+  };
+
+  // ── Open dataset from home view ───────────────────────────────────────────
+  const handleOpenDataset = (dsId) => {
+    setSelectedObjectId(dsId);
+    setSelectedObjectType('datasets');
+    setIsEditing(false);
+    setEditDraft(null);
+    setEditPaneItem(null);
+    setView('catalog');
+  };
+
+  // ── Add model to the current dataset (drag-drop or double-click) ──────────
+  const handleAddModelToDataset = (modelId) => {
+    if (!selectedObjectId) return;
+    const allDs = [...datasets.draft, ...datasets.dev, ...datasets.production];
+    const base = editDraft ?? JSON.parse(JSON.stringify(allDs.find((d) => d.id === selectedObjectId) ?? {}));
+    if ((base.modelIds || []).includes(modelId)) return;
+    const newDraft = { ...base, modelIds: [...new Set([...(base.modelIds ?? []), modelId])] };
+    setEditDraft(newDraft);
+    setIsEditing(true);
+  };
+
+  const handleAddMetricToDataset = (metricId) => {
+    if (!selectedObjectId) return;
+    setMetrics((prev) => prev.map((m) =>
+      m.id === metricId ? { ...m, datasetId: selectedObjectId } : m
+    ));
+    if (!isEditing) setIsEditing(true);
+  };
+
+  // ── Open edit pane ────────────────────────────────────────────────────────
+  const openEditPane = (type, id, mode, itemRef) => {
+    if (type === 'model') {
+      const m = dataModels.find((dm) => dm.id === id);
+      setEditPaneDraft(m ? JSON.parse(JSON.stringify(m)) : null);
+    } else if (type === 'metric') {
+      const m = metrics.find((mt) => mt.id === id);
+      setEditPaneDraft(
+        m
+          ? JSON.parse(JSON.stringify(m))
+          : { id: `metric-${Date.now()}`, name: '', description: '', datasetId: selectedObjectId, expression: '', aggregation: 'SUM', isGlobal: false }
+      );
+    }
+    setEditPaneItem({ type, id, mode });
+    if (itemRef?.current && lpContainerRef.current) {
+      const itemRect = itemRef.current.getBoundingClientRect();
+      // pane is position:fixed; top:24px — caretY is relative to pane top
+      const PANE_TOP = 24;
+      const rawY = itemRect.top + itemRect.height / 2 - PANE_TOP;
+      const viewportH = window.innerHeight;
+      const clampedY = Math.min(Math.max(rawY, 16), viewportH - PANE_TOP * 2 - 16);
+      setEditPaneCaretY(clampedY);
+    } else {
+      setEditPaneCaretY(null);
+    }
+  };
+
+  const handleCloseEditPane = () => {
+    setEditPaneItem(null);
+    setEditPaneDraft(null);
+    setEditPaneCaretY(null);
+  };
+
+  const handleSaveFromPane = () => {
+    if (!editPaneDraft || !editPaneItem) return;
+    const savedId = editPaneDraft.id || `metric-${Date.now()}`;
+    if (editPaneItem.type === 'model') {
+      setDataModels((prev) => prev.map((m) => m.id === editPaneDraft.id ? editPaneDraft : m));
+    } else if (editPaneItem.type === 'metric') {
+      if (editPaneItem.id) {
+        setMetrics((prev) => prev.map((m) => m.id === editPaneDraft.id ? editPaneDraft : m));
+      } else {
+        setMetrics((prev) => [...prev, { ...editPaneDraft, id: savedId }]);
+      }
+    }
+    // Switch back to inspect mode, keep pane open
+    setEditPaneItem((prev) => prev ? { ...prev, id: savedId, mode: 'inspect' } : prev);
+  };
+
+  // Derived: currently selected dataset (for catalog view)
+  const selectedDataset = useMemo(() => {
+    if (!selectedObjectId || selectedObjectType !== 'datasets') return null;
+    const allDs = [...datasets.draft, ...datasets.dev, ...datasets.production];
+    return allDs.find((d) => d.id === selectedObjectId) ?? null;
+  }, [selectedObjectId, selectedObjectType, datasets]);
+
+  // Derived: model/metric for the edit pane header
+  const editPaneModel = editPaneItem?.type === 'model'
+    ? dataModels.find((m) => m.id === editPaneItem.id) ?? null
+    : null;
+  const editPaneMetric = editPaneItem?.type === 'metric'
+    ? metrics.find((m) => m.id === editPaneItem.id) ?? null
+    : null;
+  const editPaneTitle = editPaneItem?.type === 'model'
+    ? (editPaneDraft?.name || editPaneModel?.name || 'Model')
+    : (editPaneDraft?.name || editPaneMetric?.name || 'Metric');
+
   // ─────────────────────────────────────────────────────────────────────────
 
   return (
@@ -3486,282 +4004,220 @@ function App() {
       <nav className="nav">
         {/* ── Left ── */}
         <div className="nav-left">
-          {view === 'catalog' ? (
+          {view === 'home' ? (
             <div className="nav-brand">
               <span className="nav-brand-dot" />
               <span>Reveal</span>
               <span className="nav-brand-sub">Data Catalog</span>
             </div>
+          ) : view === 'catalog' ? (
+            <div className="nav-breadcrumb">
+              <button className="plain-btn nav-back-home" onClick={() => { setView('home'); setEditPaneItem(null); }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+              </button>
+              <span className="nav-breadcrumb-sep">/</span>
+              <DatasetCombo
+                datasets={datasets}
+                selectedObjectId={selectedObjectId}
+                onChange={(id) => {
+                  setSelectedObjectId(id);
+                  setSelectedObjectType('datasets');
+                  setIsEditing(false);
+                  setEditDraft(null);
+                  setEditPaneItem(null);
+                }}
+              />
+            </div>
           ) : (
-            <>
-              <button className="plain-btn nav-back" title="Back to catalog" onClick={() => setView('catalog')}>←</button>
-              <Menu.Root>
-                <Menu.Trigger className="plain-btn nav-model-btn">Sales overview ▾</Menu.Trigger>
-                <Menu.Portal>
-                  <Menu.Positioner sideOffset={6}>
-                    <Menu.Popup className="menu-popup">
-                      <Menu.Item className="menu-item">Rename dataset</Menu.Item>
-                      <Menu.Item className="menu-item">Edit description</Menu.Item>
-                      <Menu.Item className="menu-item">Duplicate</Menu.Item>
-                      <Menu.Separator className="menu-sep" />
-                      <Menu.Item className="menu-item" onClick={() => setStage('production')}>Promote to production</Menu.Item>
-                      <Menu.Item className="menu-item" onClick={() => setStage('draft')}>Move to draft</Menu.Item>
-                      <Menu.Separator className="menu-sep" />
-                      <Menu.Item className="menu-item danger">Delete dataset</Menu.Item>
-                    </Menu.Popup>
-                  </Menu.Positioner>
-                </Menu.Portal>
-              </Menu.Root>
-              <span className={`badge ${badgeClass}`}>{stage}</span>
-            </>
+            <button className="plain-btn nav-back" onClick={() => { setView('home'); setEditPaneItem(null); }}>
+              ← Home
+            </button>
           )}
         </div>
 
-        {/* ── Center AI bar ── */}
-        {view !== 'catalog' && (
-          <div className={`nav-ai-wrap${aiModalOpen ? ' modal-open' : ''}`}>
-            {aiModalOpen ? (
-              /* Session-active pill — click to reopen modal */
-              <button className="nav-ai-active-pill" onClick={() => setAiModalOpen(true)}>
-                <span className="nav-ai-sparkle">✦</span>
-                <span className="nav-ai-active-label">AI chat · {aiBarMessages.length} message{aiBarMessages.length !== 1 ? 's' : ''}</span>
-                <button className="plain-btn nav-ai-close-btn" onMouseDown={(e) => { e.stopPropagation(); e.preventDefault(); resetAiBar(); }} title="End session">✕</button>
-              </button>
-            ) : (
-              <div className={`nav-ai-bar${aiBarOpen ? ' focused' : ''}`} onClick={() => { setAiBarOpen(true); aiBarRef.current?.focus(); }}>
-                <span className="nav-ai-sparkle">✦</span>
-                <textarea
-                  ref={aiBarRef}
-                  className="nav-ai-input"
-                  placeholder="Ask AI to build or modify your model…"
-                  value={aiBarValue}
-                  rows={1}
-                  onChange={handleAiBarChange}
-                  onFocus={() => setAiBarOpen(true)}
-                  onKeyDown={handleAiBarKey}
-                  disabled={aiBarThinking}
-                />
-                {aiBarValue && !aiBarThinking && (
-                  <button className="plain-btn nav-ai-send" onMouseDown={(e) => { e.preventDefault(); handleAiBarSubmit(); }} title="Send">↑</button>
-                )}
-                {aiBarOpen && !aiBarValue && (
-                  <button className="plain-btn nav-ai-close-btn" onMouseDown={(e) => { e.preventDefault(); resetAiBar(); }} title="Close">✕</button>
-                )}
-              </div>
-            )}
-          </div>
-        )}
+        {/* ── Center (unused in catalog — breadcrumb is left-aligned) ── */}
+        <div className="nav-center" />
 
         {/* ── Right ── */}
-        {view === 'catalog' && (
-          <div className="nav-right">
+        <div className="nav-right">
+          {view === 'home' && (
             <button className="btn" onClick={() => setSrcDrawerOpen(true)}>Edit data sources</button>
-          </div>
-        )}
-        {view === 'editor' && (
-          <div className="nav-right">
-            <button className="btn" onClick={() => setView('inspect')}>Inspect view</button>
-            <button className="btn btn-primary" onClick={() => setAiOpen(true)}>Save dataset</button>
-          </div>
-        )}
-        {view === 'inspect' && (
-          <div className="nav-right">
-            <span className="badge badge-dev">🔒 Read-only · viewer access</span>
-            <button className="btn" onClick={() => setView('editor')}>← Back to editor</button>
-          </div>
-        )}
+          )}
+          {view === 'catalog' && selectedDataset && !isEditing && (
+            <button className="btn btn-primary" onClick={() => {
+              setEditDraft(JSON.parse(JSON.stringify(selectedDataset)));
+              setIsEditing(true);
+            }}>Edit</button>
+          )}
+          {view === 'catalog' && selectedDataset && isEditing && (
+            <>
+              <button className="btn" onClick={() => { setIsEditing(false); setEditDraft(null); setEditPaneItem(null); }}>Cancel</button>
+              <button className="btn btn-primary" onClick={() => {
+                if (!editDraft) return;
+                setDatasets((prev) => {
+                  const update = (arr) => arr.map((d) => d.id === editDraft.id ? { ...d, ...editDraft } : d);
+                  return { draft: update(prev.draft), dev: update(prev.dev), production: update(prev.production) };
+                });
+                setIsEditing(false);
+                setEditDraft(null);
+                setEditPaneItem(null);
+              }}>Save</button>
+            </>
+          )}
+        </div>
       </nav>
 
+      {/* ── Home view ── */}
+      {view === 'home' && (
+        <section className="view active">
+          <HomeView
+            datasets={datasets}
+            dataModels={dataModels}
+            metrics={metrics}
+            onOpenDataset={handleOpenDataset}
+            onNewDataset={handleNewDataset}
+          />
+        </section>
+      )}
+
+      {/* ── Catalog / Dataset editor view ── */}
       {view === 'catalog' ? (
         <section className="view active">
           <div className="catalog-layout">
-            <CatalogLeftPane
-              objectType={objectType}
-              setObjectType={setObjectType}
-              catalogSearch={catalogSearch}
-              setCatalogSearch={setCatalogSearch}
-              selectedObjectId={selectedObjectId}
-              selectedObjectType={selectedObjectType}
-              onSelectItem={(id, type) => { setSelectedObjectId(id); setSelectedObjectType(type); setIsEditing(false); setEditDraft(null); }}
-              dataModels={dataModels}
-              setDataModels={setDataModels}
-              datasets={datasets}
-              setDatasets={setDatasets}
-              metrics={metrics}
-              isEditing={isEditing}
-              onOpenEditor={(datasetStage) => { setView('editor'); setStage(datasetStage); }}
-              onEditModel={(modelId) => {
-                const model = dataModels.find((m) => m.id === modelId);
-                if (!model) return;
-                setSelectedObjectId(modelId);
-                setSelectedObjectType('models');
-                setEditDraft(JSON.parse(JSON.stringify(model)));
-                setIsEditing(true);
-              }}
-              onEditDataset={(dsId) => {
-                const allDs = [...datasets.draft, ...datasets.dev, ...datasets.production];
-                const ds = allDs.find((d) => d.id === dsId);
-                if (!ds) return;
-                setSelectedObjectId(dsId);
-                setSelectedObjectType('datasets');
-                setEditDraft(JSON.parse(JSON.stringify(ds)));
-                setIsEditing(true);
-              }}
-            />
-            <div className="cat-right-pane">
-              {/* Data Model detail */}
-              {selectedObjectType === 'models' && selectedObjectId && (
+            <div className="lp-container" ref={lpContainerRef}>
+              <EditorLeftPane
+                dataModels={dataModels}
+                metrics={metrics}
+                currentDataset={selectedDataset}
+                isDatasetEditing={isEditing}
+                activeItemId={editPaneItem?.id || null}
+                activeItemType={editPaneItem?.type || null}
+                onBeforeTabChange={(newTab) => {
+                  if (!editPaneItem) return true;
+                  if (editPaneItem.mode === 'inspect') {
+                    handleCloseEditPane();
+                    return true;
+                  }
+                  const ok = window.confirm('You have unsaved changes. Discard and close?');
+                  if (ok) handleCloseEditPane();
+                  return ok;
+                }}
+                onEditModel={(id, ref) => openEditPane('model', id, 'edit', ref)}
+                onInspectModel={(id, ref) => openEditPane('model', id, 'inspect', ref)}
+                onDeleteModel={(id) => {
+                  if (window.confirm('Delete this model from the catalog?')) {
+                    setDataModels((prev) => prev.filter((m) => m.id !== id));
+                  }
+                }}
+                onAddModel={(id) => handleAddModelToDataset(id)}
+                onEditMetric={(id, ref) => openEditPane('metric', id, 'edit', ref)}
+                onInspectMetric={(id, ref) => openEditPane('metric', id, 'inspect', ref)}
+                onDeleteMetric={(id) => {
+                  if (window.confirm('Delete this metric?')) {
+                    setMetrics((prev) => prev.filter((m) => m.id !== id));
+                  }
+                }}
+                onAddMetric={(id) => handleAddMetricToDataset(id)}
+                onNewModel={() => {
+                  const id = `model-${Date.now()}`;
+                  const stub = { id, name: 'New Model', sourceId: 'sales-db', sourceName: 'Sales DB', description: '', grain: '', usedInDatasetIds: [], fields: [] };
+                  setDataModels((prev) => [...prev, stub]);
+                  openEditPane('model', id, 'edit', null);
+                }}
+                onNewMetric={() => openEditPane('metric', null, 'edit', null)}
+              />
+            </div>
+            <EditPane
+              isOpen={editPaneItem !== null}
+              mode={editPaneItem?.mode || 'inspect'}
+              title={editPaneTitle}
+              typeBadge={editPaneItem?.type || null}
+              caretY={editPaneCaretY}
+              isGlobal={editPaneItem?.type === 'model'}
+              width={editPaneItem?.type === 'metric' ? 500 : undefined}
+              excludeRef={lpContainerRef}
+              onClose={handleCloseEditPane}
+              onSave={handleSaveFromPane}
+              onEdit={() => setEditPaneItem((prev) => prev ? { ...prev, mode: 'edit' } : prev)}
+              stableKey={editPaneItem?.type === 'model' ? (editPaneDraft?.stableKey || (editPaneModel ? autoStableKey(editPaneModel) : undefined)) : undefined}
+              onStableKeyChange={editPaneItem?.type === 'model' ? (val) => setEditPaneDraft((p) => p ? { ...p, stableKey: val } : p) : undefined}
+            >
+              {editPaneItem?.type === 'model' && editPaneDraft && (
                 <DataModelDetail
-                  model={dataModels.find((m) => m.id === selectedObjectId)}
+                  model={editPaneModel ?? editPaneDraft}
+                  isEditing={editPaneItem.mode === 'edit'}
+                  editDraft={editPaneDraft}
+                  setIsEditing={() => {}}
+                  setEditDraft={setEditPaneDraft}
+                  onSave={handleSaveFromPane}
+                  onCancel={handleCloseEditPane}
+                  inPane
+                />
+              )}
+              {editPaneItem?.type === 'metric' && (
+                <MetricsFormulaEditor
+                  metric={editPaneMetric}
+                  dataModels={dataModels}
+                  isEditing={editPaneItem.mode === 'edit'}
+                  draft={editPaneDraft}
+                  setDraft={setEditPaneDraft}
+                />
+              )}
+            </EditPane>
+            <div
+              className="cat-canvas-area"
+              ref={catalogPaneRef}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                const modelId = e.dataTransfer.getData('application/x-model-id');
+                if (modelId) handleAddModelToDataset(modelId);
+                const metricId = e.dataTransfer.getData('application/x-metric-id');
+                if (metricId) handleAddMetricToDataset(metricId);
+              }}
+            >
+              {selectedDataset ? (
+                <DatasetCanvasPane
+                  key={selectedObjectId}
+                  dataset={selectedDataset}
+                  dataModels={dataModels}
+                  metrics={metrics}
                   isEditing={isEditing}
                   editDraft={editDraft}
-                  setIsEditing={setIsEditing}
                   setEditDraft={setEditDraft}
+                  onEdit={() => {
+                    setEditDraft(JSON.parse(JSON.stringify(selectedDataset)));
+                    setIsEditing(true);
+                  }}
+                  onCancel={() => { setIsEditing(false); setEditDraft(null); }}
                   onSave={(draft) => {
-                    setDataModels((prev) => prev.map((m) => m.id === draft.id ? draft : m));
+                    setDatasets((prev) => {
+                      const update = (arr) => arr.map((d) => d.id === draft.id ? { ...d, ...draft } : d);
+                      return { draft: update(prev.draft), dev: update(prev.dev), production: update(prev.production) };
+                    });
                     setIsEditing(false);
                     setEditDraft(null);
                   }}
-                  onCancel={() => { setIsEditing(false); setEditDraft(null); }}
+                  onOpenAddModel={() => setAddModelOpen(true)}
+                  onNavigateToModel={(id) => openEditPane('model', id, 'inspect', null)}
+                  onAddMetric={() => openEditPane('metric', null, 'edit', null)}
+                  onInspectMetric={(id) => openEditPane('metric', id, 'inspect', null)}
+                  onEditMetric={(id) => openEditPane('metric', id, 'edit', null)}
+                  onRemoveMetric={(id) => setMetrics((prev) => prev.map((m) => m.id === id ? { ...m, datasetId: null } : m))}
                 />
-              )}
-
-              {/* Dataset canvas */}
-              {selectedObjectType === 'datasets' && selectedObjectId && (() => {
-                const allDs = [...datasets.draft, ...datasets.dev, ...datasets.production];
-                const ds = allDs.find((d) => d.id === selectedObjectId);
-                if (!ds) return null;
-                return (
-                  <DatasetCanvasPane
-                    key={selectedObjectId}
-                    dataset={ds}
-                    dataModels={dataModels}
-                    isEditing={isEditing}
-                    editDraft={editDraft}
-                    setEditDraft={setEditDraft}
-                    onEdit={() => {
-                      setEditDraft(JSON.parse(JSON.stringify(ds)));
-                      setIsEditing(true);
-                    }}
-                    onCancel={() => { setIsEditing(false); setEditDraft(null); }}
-                    onSave={(draft) => {
-                      setDatasets((prev) => {
-                        const update = (arr) => arr.map((d) => d.id === draft.id ? { ...d, ...draft } : d);
-                        return { draft: update(prev.draft), dev: update(prev.dev), production: update(prev.production) };
-                      });
-                      setIsEditing(false);
-                      setEditDraft(null);
-                    }}
-                    onOpenAddModel={() => setAddModelOpen(true)}
-                    onNavigateToModel={(id) => {
-                      setObjectType('models');
-                      setSelectedObjectId(id);
-                      setSelectedObjectType('models');
-                      setIsEditing(false);
-                      setEditDraft(null);
-                    }}
-                  />
-                );
-              })()}
-
-              {!selectedObjectId && objectType === 'models' && (
-                <div className="cat-right-empty">
+              ) : (
+                <div className="cat-canvas-empty">
                   <div className="empty-state">
-                    <div className="empty-state-icon">
-                      <svg width="48" height="48" viewBox="0 0 48 48" fill="none" aria-hidden="true">
-                        <rect x="6" y="10" width="36" height="28" rx="4" stroke="currentColor" strokeWidth="2" fill="none"/>
-                        <line x1="6" y1="18" x2="42" y2="18" stroke="currentColor" strokeWidth="2"/>
-                        <line x1="6" y1="26" x2="42" y2="26" stroke="currentColor" strokeWidth="2"/>
-                        <line x1="16" y1="10" x2="16" y2="38" stroke="currentColor" strokeWidth="2"/>
-                        <circle cx="38" cy="38" r="8" fill="var(--bg)" stroke="currentColor" strokeWidth="2"/>
-                        <line x1="35" y1="38" x2="41" y2="38" stroke="currentColor" strokeWidth="2"/>
-                        <line x1="38" y1="35" x2="38" y2="41" stroke="currentColor" strokeWidth="2"/>
-                      </svg>
-                    </div>
-                    <h3 className="empty-state-title">No model selected</h3>
-                    <p className="empty-state-desc">Data Models define the semantic meaning of a table — fields, grain, roles, and synonyms that AI and analysts can rely on.</p>
-                    <div className="empty-state-actions">
-                      <button className="btn btn-primary" onClick={() => {
-                        const id = `model-${Date.now()}`;
-                        const stub = { id, name: 'New Data Model', sourceId: 'sales-db', sourceName: 'Sales DB', description: '', grain: '', usedInDatasetIds: [], fields: [] };
-                        setDataModels((prev) => [...prev, stub]);
-                        setObjectType('models');
-                        setSelectedObjectId(id);
-                        setSelectedObjectType('models');
-                      }}>+ New Data Model</button>
-                    </div>
-                    <div className="empty-state-hints">
-                      <span className="empty-hint"><span className="empty-hint-key">↑</span> Select a model from the list</span>
-                      <span className="empty-hint"><span className="empty-hint-key">⌘K</span> Search models</span>
-                    </div>
-                  </div>
-                </div>
-              )}
-              {!selectedObjectId && objectType === 'datasets' && (
-                <div className="cat-right-empty">
-                  <div className="empty-state">
-                    <div className="empty-state-icon">
-                      <svg width="48" height="48" viewBox="0 0 48 48" fill="none" aria-hidden="true">
-                        <rect x="4" y="14" width="18" height="20" rx="3" stroke="currentColor" strokeWidth="2" fill="none"/>
-                        <rect x="26" y="14" width="18" height="20" rx="3" stroke="currentColor" strokeWidth="2" fill="none"/>
-                        <line x1="22" y1="24" x2="26" y2="24" stroke="currentColor" strokeWidth="2"/>
-                        <polyline points="24,21 27,24 24,27" stroke="currentColor" strokeWidth="2" fill="none" strokeLinejoin="round" strokeLinecap="round"/>
-                        <line x1="8" y1="22" x2="18" y2="22" stroke="currentColor" strokeWidth="1.5" opacity="0.5"/>
-                        <line x1="8" y1="26" x2="14" y2="26" stroke="currentColor" strokeWidth="1.5" opacity="0.5"/>
-                        <line x1="30" y1="22" x2="40" y2="22" stroke="currentColor" strokeWidth="1.5" opacity="0.5"/>
-                        <line x1="30" y1="26" x2="36" y2="26" stroke="currentColor" strokeWidth="1.5" opacity="0.5"/>
-                      </svg>
-                    </div>
                     <h3 className="empty-state-title">No dataset selected</h3>
-                    <p className="empty-state-desc">Datasets join multiple Data Models into a queryable structure. Define how tables relate so AI can generate accurate queries.</p>
-                    <div className="empty-state-actions">
-                      <button className="btn btn-primary" onClick={() => {
-                        const id = `dataset-${Date.now()}`;
-                        const stub = { id, name: 'New Dataset', desc: '', entities: 0, joins: 0, uses: 0, stage: 'draft', progress: 0, modelIds: [] };
-                        setDatasets((prev) => ({ ...prev, draft: [...prev.draft, stub] }));
-                        setObjectType('datasets');
-                        setSelectedObjectId(id);
-                        setSelectedObjectType('datasets');
-                      }}>+ New Dataset</button>
-                    </div>
-                    <div className="empty-state-hints">
-                      <span className="empty-hint"><span className="empty-hint-key">↑</span> Select a dataset from the list</span>
-                    </div>
+                    <p className="empty-state-desc">Select a dataset from the dropdown above, or create a new one.</p>
+                    <button className="btn btn-primary" onClick={handleNewDataset}>+ New Dataset</button>
                   </div>
                 </div>
               )}
-              {!selectedObjectId && objectType === 'metrics' && (
-                <div className="cat-right-empty">
-                  <div className="empty-state">
-                    <div className="empty-state-icon">
-                      <svg width="48" height="48" viewBox="0 0 48 48" fill="none" aria-hidden="true">
-                        <polyline points="6,36 16,24 24,30 34,14 42,20" stroke="currentColor" strokeWidth="2.5" fill="none" strokeLinejoin="round" strokeLinecap="round"/>
-                        <circle cx="34" cy="14" r="3" fill="currentColor" opacity="0.7"/>
-                        <line x1="6" y1="38" x2="42" y2="38" stroke="currentColor" strokeWidth="1.5" opacity="0.3"/>
-                        <line x1="6" y1="10" x2="6" y2="38" stroke="currentColor" strokeWidth="1.5" opacity="0.3"/>
-                      </svg>
-                    </div>
-                    <h3 className="empty-state-title">No metric selected</h3>
-                    <p className="empty-state-desc">Metrics are business-defined KPIs built on datasets — revenue, conversion, churn — with consistent aggregation logic.</p>
-                    <div className="empty-state-actions">
-                      <button className="btn btn-primary" onClick={() => setObjectType('metrics')}>+ New Metric</button>
-                    </div>
-                    <div className="empty-state-hints">
-                      <span className="empty-hint"><span className="empty-hint-key">↑</span> Select a metric from the list</span>
-                    </div>
-                  </div>
-                </div>
-              )}
-              {/* Cross-type selection hint */}
-              {selectedObjectId && selectedObjectType !== objectType && (
-                <div className="cat-right-cross-hint">
-                  Showing {selectedObjectType} detail. Select an item from the list above to switch.
-                </div>
-              )}
+
             </div>
           </div>
 
-          {/* Add Data Models modal — always rendered when a dataset is selected so it persists across tab switches */}
+          {/* Add Data Models modal */}
           <AddModelModal
             open={addModelOpen}
             onClose={() => setAddModelOpen(false)}
@@ -3780,289 +4236,6 @@ function App() {
               setIsEditing(true);
             }}
           />
-        </section>
-      ) : null}
-
-      {view === 'editor' ? (
-        <section className="view active">
-          <div className="ed-body">
-            <aside className={`side-panel left ${leftCollapsed ? 'collapsed' : ''}`}>
-              <header className="panel-hd">
-                <span className="panel-hd-title">Data</span>
-                <div className="panel-hd-actions">
-                  <button className="plain-btn add-source-btn" onClick={() => openAddSource()}>+ add</button>
-                  <button className="plain-btn panel-collapse-btn" onClick={() => setLeftCollapsed(true)} aria-label="Collapse panel">
-                    <PanelLeftOpen style={{ transform: 'rotate(180deg)' }} size={18} />
-                  </button>
-                </div>
-              </header>
-              <div className="sb-scroll">
-                {canvasGroups.map((group) => (
-                  <div key={group.name}>
-                    <div className="src-group-hd">
-                      <span>▾ {group.name}</span>
-                    </div>
-                    {group.tables.map((tableId) => {
-                      const entity = canvasEntities.find((e) => e.id === tableId);
-                      return (
-                        <div
-                          key={tableId}
-                          className={`tbl-row ${activeTableId === tableId ? 'active' : ''}`}
-                          onClick={() => setActiveTableId(tableId)}
-                          role="button"
-                          tabIndex={0}
-                          onKeyDown={(e) => { if (e.key === 'Enter') setActiveTableId(tableId); }}
-                        >
-                          <span className="tbl-row-name">{tableId}</span>
-                          {entity?.primary && <span className="tbl-primary-pill">primary</span>}
-                          <button
-                            className="plain-btn tbl-row-remove"
-                            onClick={(e) => { e.stopPropagation(); handleRemoveFromCanvas(tableId); }}
-                            aria-label={`Remove ${tableId}`}
-                            title={`Remove ${tableId}`}
-                          >×</button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ))}
-              </div>
-            </aside>
-
-            <ReactFlowProvider>
-              <EditorCanvas
-                canvasEntities={canvasEntities}
-                entityPositions={entityPositions}
-                setEntityPositions={setEntityPositions}
-                joins={joins}
-                setJoins={setJoins}
-                joinedEntityIds={joinedEntityIds}
-                hiddenFields={hiddenFields}
-                fieldDisplayNames={fieldDisplayNames}
-                fieldDescriptions={fieldDescriptions}
-                fieldFormulas={fieldFormulas}
-                setFieldDisplayNames={setFieldDisplayNames}
-                setFieldDescriptions={setFieldDescriptions}
-                setFieldFormulas={setFieldFormulas}
-                activeField={activeField}
-                activeJoin={activeJoin}
-                selectField={selectField}
-                selectJoin={selectJoin}
-                toggleHidden={toggleHidden}
-                createDragJoin={createDragJoin}
-                closeInspectorPopup={closeInspectorPopup}
-                hoveredJoinType={hoveredJoinType}
-                setHoveredJoinType={setHoveredJoinType}
-                leftCollapsed={leftCollapsed}
-                setLeftCollapsed={setLeftCollapsed}
-                rightCollapsed={rightCollapsed}
-                setRightCollapsed={setRightCollapsed}
-                rightMode={rightMode}
-                onAddCalcField={(entityId) => setAddCalcFieldEntityId(entityId)}
-                activeTableId={activeTableId}
-                setActiveTableId={setActiveTableId}
-              />
-            </ReactFlowProvider>
-
-            <aside className={`side-panel right ${rightCollapsed ? 'collapsed' : ''}`}>
-              <Tabs.Root value={rightMode} onValueChange={setRightMode} className="mode-wrap">
-                <header className="panel-hd tight">
-                  <Tabs.List className="sql-tabs">
-                    <Tabs.Tab className="sql-tab" value="sql">SQL</Tabs.Tab>
-                    <Tabs.Tab className="sql-tab" value="ai">AI context</Tabs.Tab>
-                  </Tabs.List>
-                  <button className="plain-btn panel-collapse-btn" onClick={() => setRightCollapsed(true)} aria-label="Collapse SQL panel">
-                    <PanelLeftOpen size={18} />
-                  </button>
-                </header>
-                <Tabs.Panel value="sql" className="sql-content tab-panel">
-                  <SqlHighlight sql={currentSql} />
-                </Tabs.Panel>
-                <Tabs.Panel value="ai" className="sql-content ai-copy tab-panel">
-                  <div className="ai-context-header">
-                    <h4>Model Intent</h4>
-                    <p>Machine-readable semantic context for AI query generation and interpretation.</p>
-                  </div>
-                  <section className="ai-section">
-                    <h5>Row Meaning</h5>
-                    <code>{`{ "row_meaning": "order_line_item", "description": "One row per individual order line" }`}</code>
-                  </section>
-                  <section className="ai-section">
-                    <h5>Relationship Map</h5>
-                    <pre className="ai-pre">{`{\n  "orders": { "entity_type": "fact", "is_primary": true },\n  "customers": { "entity_type": "dimension", "join": "many-to-one", "is_optional": true },\n  "products": { "entity_type": "dimension", "join": "many-to-one", "is_optional": false }\n}`}</pre>
-                  </section>
-                  <section className="ai-section">
-                    <h5>Aggregations</h5>
-                    <pre className="ai-pre">{`{\n  "revenue_net": { "role": "measure", "calculation": "SUM", "description": "Net revenue after discounts" },\n  "unit_cost": { "role": "measure", "calculation": "AVG" }\n}`}</pre>
-                  </section>
-                  <div className="ai-footer">
-                    <p className="muted">These semantic cues are injected into the LLM system prompt for improved accuracy.</p>
-                  </div>
-                </Tabs.Panel>
-              </Tabs.Root>
-            </aside>
-          </div>
-
-          <section className="prev-panel">
-            <header className="prev-hd">
-              <div className="prev-title">Preview · 3 of 4,821 rows</div>
-              <span className="badge badge-warn">2 null customer rows</span>
-            </header>
-            <div className="prev-scroll">
-              <table className="ptab">
-                <thead>
-                  <tr>{visibleFields.map((field) => {
-                    const isNum = ['#', '$', 'fx'].includes(field.type);
-                    return <th key={`${field.entity}-${field.key}`} className={`${isNum ? 'col-num' : ''} ${activeField?.fieldKey === field.key ? 'active-col' : ''}`}>{field.label}</th>;
-                  })}</tr>
-                </thead>
-                <tbody>
-                  {PREVIEW_ROWS.map((row) => (
-                    <tr key={row.order_id}>
-                      {visibleFields.map((field) => {
-                        const isNum = ['#', '$', 'fx'].includes(field.type);
-                        return (
-                          <td key={`${row.order_id}-${field.entity}-${field.key}`} className={`${isNum ? 'col-num' : ''} ${activeField?.fieldKey === field.key ? 'active-col' : ''}`}>
-                            {row[field.key] === null ? <span className="null-val">null</span> : row[field.key]}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        </section>
-      ) : null}
-
-      {view === 'inspect' ? (
-        <section className="view active">
-          <div className="insp-body">
-            <main className="insp-main">
-              <header className="insp-model-hd">
-                <div className="insp-model-hd-row">
-                  <h2>Sales overview <span className={`badge ${badgeClass}`}>{stage}</span></h2>
-                  <div className="insp-view-toggle">
-                    <button className={`insp-toggle-btn ${inspectView === 'visual' ? 'active' : ''}`} onClick={() => setInspectView('visual')}>Visual</button>
-                    <button className={`insp-toggle-btn ${inspectView === 'markdown' ? 'active' : ''}`} onClick={() => setInspectView('markdown')}>Markdown</button>
-                    <button className={`insp-toggle-btn ${inspectView === 'json' ? 'active' : ''}`} onClick={() => setInspectView('json')}>JSON</button>
-                  </div>
-                </div>
-                <p>Orders joined with customers and products from two separate databases. Use to analyze revenue by customer segment, region, and product category.</p>
-                <div className="insp-grain-summary">
-                  <span className="grain-lbl">Analytics Scope:</span>
-                  <span className="grain-val">Individual order line items</span>
-                </div>
-                <div className="insp-tags">
-                  <span className="badge badge-neutral">3 entities</span>
-                  <span className="badge badge-neutral">2 joins</span>
-                  <span className="badge badge-neutral">{visibleFields.length} visible fields</span>
-                </div>
-              </header>
-
-              {inspectView === 'markdown' ? (
-                <div className="insp-md-wrap"><pre className="insp-md-pre">{inspectMarkdown}</pre></div>
-              ) : null}
-
-              {inspectView === 'json' ? (
-                <div className="insp-md-wrap">
-                  <JsonHighlight json={inspectJson} />
-                </div>
-              ) : null}
-
-              {inspectView === 'visual' ? (
-                <div className="insp-flex-row">
-                  <div className="insp-section">
-                    <h3 className="insp-section-hd" style={{ marginTop: 0 }}>Entities &amp; fields</h3>
-                    <div className="insp-cards-row">
-                      {canvasEntities.map((entity) => {
-                        const visibleEntityFields = entity.fields.filter((f) => !hiddenFields.has(f.key));
-                        const dimensionFields = visibleEntityFields.filter((f) => f.role !== 'MEASURE');
-                        const measureFields = visibleEntityFields.filter((f) => f.role === 'MEASURE');
-                        return (
-                          <article className={`ent-block ${entity.primary ? 'is-primary' : ''}`} key={entity.id}>
-                            <header className="ent-block-hd">
-                              <div className="ent-block-name-row">
-                                <span className="ent-block-name">{titleCase(entity.label)} <span className="ent-block-db">({entity.dbName})</span></span>
-                                {entity.primary ? <span className="ent-primary-badge">Primary</span> : null}
-                              </div>
-                              <div className="ent-block-grain">{entity.definition}</div>
-                            </header>
-                            {dimensionFields.length ? (
-                              <section className="field-group">
-                                <h4 className="field-group-title dimensions">Dimensions <span className="field-group-count">{dimensionFields.length}</span></h4>
-                                {dimensionFields.map((field) => (
-                                  <div className="ifield" key={field.key}>
-                                    <span className="ifield-type-chip">{field.type}</span>
-                                    <div className="ifield-right">
-                                      <div className="ifield-name-row">
-                                        <span className="ifield-name">{fieldDisplayNames[field.key] || field.label}{fieldDisplayNames[field.key] ? <span className="ifield-orig">({field.label})</span> : null}</span>
-                                        {field.isKey && <span className="ifield-badge ifield-badge-key">key</span>}
-                                      </div>
-                                      {(fieldDescriptions[field.key] || field.semanticDesc) ? <p className="ifield-desc">{fieldDescriptions[field.key] || field.semanticDesc}</p> : null}
-                                    </div>
-                                  </div>
-                                ))}
-                              </section>
-                            ) : null}
-                            {measureFields.length ? (
-                              <section className="field-group">
-                                <h4 className="field-group-title measures">Measures <span className="field-group-count">{measureFields.length}</span></h4>
-                                {measureFields.map((field) => (
-                                  <div className="ifield" key={field.key}>
-                                    <span className="ifield-type-chip">{field.type}</span>
-                                    <div className="ifield-right">
-                                      <div className="ifield-name-row">
-                                        <span className="ifield-name">{fieldDisplayNames[field.key] || field.label}{fieldDisplayNames[field.key] ? <span className="ifield-orig">({field.label})</span> : null}</span>
-                                        {field.calc && <span className="ifield-badge ifield-badge-calc">computed</span>}
-                                        {field.agg && <span className="ifield-badge ifield-badge-agg">{field.agg}</span>}
-                                      </div>
-                                      {(fieldDescriptions[field.key] || field.semanticDesc) ? <p className="ifield-desc">{fieldDescriptions[field.key] || field.semanticDesc}</p> : null}
-                                    </div>
-                                  </div>
-                                ))}
-                              </section>
-                            ) : null}
-                          </article>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  <div className="insp-section">
-                    <h3 className="insp-section-hd" style={{ marginTop: 0 }}>Relationships &amp; Core Logic</h3>
-                    <div className="insp-cards-row">
-                      {Object.values(joins).map((join) => (
-                        <article className="join-block" key={join.id}>
-                          <header className="join-block-hd">
-                            <span className="join-name">{titleCase(join.fromEntity)} → {titleCase(join.toEntity)}</span>
-                            <div className="join-semantics">
-                              {join.semantics.replace(/\s*\(.*?\)\s*$/, '').split(' · ').map((part, i) => (
-                                <span key={i} className={`join-sem-part join-sem-part-${i}`}>{part}</span>
-                              ))}
-                            </div>
-                          </header>
-                          <div className="join-row"><p className="join-desc">{join.desc}</p></div>
-                          <div className="join-row">
-                            <p className="join-keys">Logic: Match on <span className="mono">{join.from.split('.')[1]}</span> = <span className="mono">{join.to.split('.')[1]}</span></p>
-                          </div>
-                        </article>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              ) : null}
-            </main>
-
-            <aside className="insp-sidebar">
-              <h3 className="insp-meta-hd">Model details</h3>
-              <div className="meta-row"><span>Status</span><span><span className={`badge ${badgeClass}`}>{stage}</span></span></div>
-              <div className="meta-row"><span>Created</span><span>Mar 14, 2025</span></div>
-              <div className="meta-row"><span>Last edited</span><span>Apr 18, 2026</span></div>
-              <div className="meta-row"><span>Author</span><span>George A.</span></div>
-            </aside>
-          </div>
         </section>
       ) : null}
 
