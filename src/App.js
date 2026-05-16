@@ -15,8 +15,10 @@ import {
 import Dagre from '@dagrejs/dagre';
 import HomeView from './components/HomeView';
 import EditorLeftPane from './components/EditorLeftPane';
-import EditPane from './components/EditPane';
+import SidePane from './components/SidePane';
 import MetricsFormulaEditor from './components/MetricsFormulaEditor';
+import ModelsView from './components/ModelsView';
+import MetricsView from './components/MetricsView';
 import './App.css';
 
 // ── Source brand colors ──────────────────────────────────────────────────────
@@ -145,18 +147,19 @@ const DATA_MODELS_INITIAL = [
 ];
 
 // ── Datasets (join & execution layer — multiple Data Models combined) ─────────
+const _NOW = Date.now();
 const DATASETS_INITIAL = {
   draft: [
-    { id: 'customer-ltv', name: 'Customer LTV', desc: 'Lifetime value across orders and subscription events', entities: 2, joins: 1, uses: 0, stage: 'draft', progress: 0, modelIds: ['orders', 'customers'] },
-    { id: 'marketing-attribution', name: 'Marketing attribution', desc: 'Campaign spend linked to converted deals via UTM source', entities: 3, joins: 2, uses: 4, stage: 'draft', progress: 1, modelIds: ['contacts'] },
+    { id: 'customer-ltv', name: 'Customer LTV', desc: 'Lifetime value across orders and subscription events', entities: 2, joins: 1, uses: 0, stage: 'draft', progress: 0, modelIds: ['orders', 'customers'], lastModified: _NOW - 3600000 },
+    { id: 'marketing-attribution', name: 'Marketing attribution', desc: 'Campaign spend linked to converted deals via UTM source', entities: 3, joins: 2, uses: 4, stage: 'draft', progress: 1, modelIds: ['contacts'], lastModified: _NOW - 7200000 },
   ],
   dev: [
-    { id: 'sales-overview', name: 'Sales overview', desc: 'Orders joined with customers and products for sales exploration', entities: 3, joins: 2, uses: 12, stage: 'dev', progress: 6, modelIds: ['orders', 'customers', 'products'] },
-    { id: 'support-tickets', name: 'Support tickets', desc: 'Zendesk tickets linked to accounts for CSAT analysis', entities: 2, joins: 1, uses: 23, stage: 'dev', progress: 11, modelIds: [] },
+    { id: 'sales-overview', name: 'Sales overview', desc: 'Orders joined with customers and products for sales exploration', entities: 3, joins: 2, uses: 12, stage: 'dev', progress: 6, modelIds: ['orders', 'customers', 'products'], lastModified: _NOW - 86400000 },
+    { id: 'support-tickets', name: 'Support tickets', desc: 'Zendesk tickets linked to accounts for CSAT analysis', entities: 2, joins: 1, uses: 23, stage: 'dev', progress: 11, modelIds: [], lastModified: _NOW - 172800000 },
   ],
   production: [
-    { id: 'revenue-summary', name: 'Revenue summary', desc: 'Aggregated revenue model used across all executive dashboards', entities: 4, joins: 3, uses: 847, stage: 'production', progress: 100, modelIds: ['orders', 'products'] },
-    { id: 'headcount-roles', name: 'Headcount & roles', desc: 'HRIS data combined with org chart hierarchy for people analytics', entities: 3, joins: 2, uses: 234, stage: 'production', progress: 28, modelIds: [] },
+    { id: 'revenue-summary', name: 'Revenue summary', desc: 'Aggregated revenue model used across all executive dashboards', entities: 4, joins: 3, uses: 847, stage: 'production', progress: 100, modelIds: ['orders', 'products'], lastModified: _NOW - 604800000 },
+    { id: 'headcount-roles', name: 'Headcount & roles', desc: 'HRIS data combined with org chart hierarchy for people analytics', entities: 3, joins: 2, uses: 234, stage: 'production', progress: 28, modelIds: [], lastModified: _NOW - 1209600000 },
   ],
 };
 
@@ -168,50 +171,6 @@ const METRICS_INITIAL = [
   { id: 'return-rate',    name: 'Return Rate',           description: 'Percentage of orders that resulted in a return.',             datasetId: 'revenue-summary', expression: 'COUNT(return_id) / COUNT(DISTINCT order_id)', aggregation: 'FORMULA', isGlobal: false },
 ];
 
-// Legacy alias — keeps the existing editor/inspect view working unchanged
-const MODELS = {
-  draft:      DATASETS_INITIAL.draft,
-  dev:        DATASETS_INITIAL.dev,
-  production: DATASETS_INITIAL.production,
-};
-
-const INITIAL_ENTITIES = [
-  {
-    id: 'orders', label: 'orders', dbName: 'Sales DB', source: 'Sales DB · primary', primary: true,
-    definition: 'Each record represents an individual order line item',
-    fields: [
-      { key: 'order_id', label: 'order_id', type: '#', isKey: true, role: 'ID', semanticDesc: 'Unique identifier per order line item. Use COUNT(DISTINCT order_id) to measure order volume. Never aggregate directly.' },
-      { key: 'customer_id', label: 'customer_id', type: '#', role: 'DIMENSION', semanticDesc: 'Foreign key to the customers table. Null values indicate guest or unattributed orders, which are preserved in this model via the LEFT JOIN.' },
-      { key: 'product_id', label: 'product_id', type: '#', role: 'DIMENSION', semanticDesc: 'Foreign key to the products table. This model uses an INNER JOIN on product_id, so orders without a matching product SKU are excluded.' },
-      { key: 'order_date', label: 'order_date', type: 'dt', role: 'DIMENSION', semanticDesc: 'Date the order was placed (UTC). Primary time axis for this model. Use to group by day, week, month, or quarter for trend and cohort analysis.' },
-      { key: 'amount', label: 'amount', type: '$', role: 'MEASURE', agg: 'SUM', semanticDesc: 'Gross order revenue in USD before any discounts or cost deductions. Aggregate with SUM. For margin or profitability questions, use revenue_net instead.' },
-      { key: 'revenue_net', label: 'revenue_net', type: 'fx', calc: true, role: 'MEASURE', agg: 'SUM', semanticDesc: 'Net revenue after deducting customer discounts and product unit cost from gross amount. The preferred metric for profitability and margin analysis.' },
-    ],
-    x: 80, y: 70,
-  },
-  {
-    id: 'customers', label: 'customers', dbName: 'Sales DB', source: 'Sales DB',
-    definition: 'Each record represents a unique customer identity',
-    fields: [
-      { key: 'customer_id', label: 'customer_id', type: '#', isKey: true, role: 'ID', semanticDesc: 'Primary key for the customers table. Each row is a unique, deduplicated customer. Use to JOIN with orders.customer_id.' },
-      { key: 'full_name', label: 'full_name', type: 'Aa', role: 'DIMENSION', semanticDesc: "Customer's display name. Use for labeling in user-facing reports. Avoid grouping or joining on this field; use customer_id instead." },
-      { key: 'region', label: 'region', type: 'Aa', role: 'DIMENSION', semanticDesc: 'Geographic sales region (e.g. APAC, LATAM, EMEA, NA). Use to segment and compare revenue or customer counts across markets.' },
-      { key: 'segment', label: 'segment', type: 'Aa', role: 'DIMENSION', semanticDesc: 'Customer market tier (e.g. Enterprise, Mid-Market, SMB). Key dimension for cohort analysis, revenue breakdown by business size, and retention comparisons.' },
-    ],
-    x: 390, y: 70,
-  },
-  {
-    id: 'products', label: 'products', dbName: 'Product DB', source: 'Product DB',
-    definition: 'Each record represents a product SKU',
-    fields: [
-      { key: 'product_id', label: 'product_id', type: '#', isKey: true, role: 'ID', semanticDesc: 'Primary key for the product catalog. Each row is a unique SKU. Use to JOIN with orders.product_id to enrich sales with product attributes.' },
-      { key: 'product_name', label: 'product_name', type: 'Aa', role: 'DIMENSION', semanticDesc: 'Human-readable product name. Use for labeling product-level results. For grouping or aggregating across product lines, prefer category.' },
-      { key: 'category', label: 'category', type: 'Aa', role: 'DIMENSION', semanticDesc: 'Product line grouping (e.g. Licenses, Services, Hardware). Use to aggregate and compare revenue across types of offering.' },
-      { key: 'unit_cost', label: 'unit_cost', type: '$', role: 'MEASURE', agg: 'AVG', semanticDesc: 'Cost to the business per product unit in USD, averaged across orders. Multiply by units sold to estimate total cost of goods sold (COGS).' },
-    ],
-    x: 245, y: 315,
-  },
-];
 
 const JOIN_TYPES = [
   { value: 'INNER', label: 'Inner', implication: 'Only matched rows survive. Unmatched orders and customers are both removed from the model.', highlight: 'intersection' },
@@ -1117,7 +1076,7 @@ const nodeTypes = { entity: EntityCardNode };
 
 // ── Field popup rendered via EdgeLabelRenderer so it sits above all nodes ───
 function FieldPopupLayer({
-  activeField, canvasEntities, entityPositions,
+  activeField, canvasEntities, entityPositions, allFields,
   hiddenFields, fieldDisplayNames, fieldDescriptions, fieldFormulas,
   setFieldDisplayNames, setFieldDescriptions, setFieldFormulas,
   toggleHidden, closeInspectorPopup,
@@ -1174,7 +1133,7 @@ function FieldPopupLayer({
               <FormulaEditor
                 value={fieldFormulas[fieldMeta.key] ?? (fieldMeta.formula || '')}
                 onChange={(v) => setFieldFormulas((prev) => ({ ...prev, [fieldMeta.key]: v }))}
-                availableFields={canvasEntities.flatMap((e) => e.fields)}
+                availableFields={allFields ?? []}
                 placeholder="e.g. amount - unit_cost"
               />
             </section>
@@ -1653,6 +1612,7 @@ function EditorCanvas({
         activeField={activeField}
         canvasEntities={canvasEntities}
         entityPositions={entityPositions}
+        allFields={canvasEntities.flatMap((e) => e.fields)}
         hiddenFields={hiddenFields}
         fieldDisplayNames={fieldDisplayNames}
         fieldDescriptions={fieldDescriptions}
@@ -2351,10 +2311,6 @@ function DsEntityCardNode({ id, data }) {
 
   const handleNavigate = (e) => {
     e.stopPropagation();
-    if (isEditing) {
-      // eslint-disable-next-line no-alert
-      if (!window.confirm('You have unsaved changes. Navigate away and lose them?')) return;
-    }
     onViewInModel();
   };
 
@@ -2824,7 +2780,7 @@ function MetricListItem({ metric, selected, onClick }) {
 }
 
 // ── Data Model detail pane ───────────────────────────────────────────────────
-function DataModelDetail({ model, isEditing, editDraft, setIsEditing, setEditDraft, onSave, onCancel, inPane = false }) {
+function DataModelDetail({ model, isEditing, editDraft, setIsEditing, setEditDraft, onSave, onCancel, inPane = false, onRequestStableKeyUnlock }) {
   const [fieldSearch, setFieldSearch] = useState('');
   const [calcModalOpen, setCalcModalOpen] = useState(false);
   const [calcEditTarget, setCalcEditTarget] = useState(null); // field being edited
@@ -2890,10 +2846,7 @@ function DataModelDetail({ model, isEditing, editDraft, setIsEditing, setEditDra
                       title={stableKeyUnlocked ? 'Lock key' : 'Unlock to edit'}
                       onClick={() => {
                         if (!stableKeyUnlocked) {
-                          // eslint-disable-next-line no-alert
-                          if (window.confirm('Changing the stable key may break existing integrations. Continue?')) {
-                            setStableKeyUnlocked(true);
-                          }
+                          onRequestStableKeyUnlock?.(() => setStableKeyUnlocked(true));
                         } else {
                           setStableKeyUnlocked(false);
                         }
@@ -3319,6 +3272,7 @@ function App() {
   const [view, setView] = useState('home');
   // eslint-disable-next-line no-unused-vars
   const [search] = useState('');
+  // eslint-disable-next-line no-unused-vars
   const [stage, setStage] = useState('dev');
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
@@ -3327,7 +3281,7 @@ function App() {
   const [activeField, setActiveField] = useState(null);
   const [fieldDescriptions, setFieldDescriptions] = useState(() =>
     Object.fromEntries(
-      INITIAL_ENTITIES.flatMap((e) => e.fields.filter((f) => f.semanticDesc).map((f) => [f.key, f.semanticDesc]))
+      DATA_MODELS_INITIAL.flatMap((m) => m.fields.filter((f) => f.semanticDesc).map((f) => [f.key, f.semanticDesc]))
     )
   );
   const [fieldDisplayNames, setFieldDisplayNames] = useState({});
@@ -3341,30 +3295,19 @@ function App() {
     jp1: { id: 'jp1', type: 'LEFT', fromEntity: 'orders', toEntity: 'customers', from: 'orders.customer_id', to: 'customers.customer_id', cardinality: 'many-to-one', semantics: 'Many-to-one · Optional relationship (Orders → Customer)', desc: 'Connects sales to customer profiles. Preservation: All orders are kept regardless of customer match.', fromChoices: ['orders.customer_id', 'orders.order_id', 'orders.product_id'], toChoices: ['customers.customer_id', 'customers.full_name'] },
     jp2: { id: 'jp2', type: 'INNER', fromEntity: 'orders', toEntity: 'products', from: 'orders.product_id', to: 'products.product_id', cardinality: 'many-to-one', semantics: 'Many-to-one · Required relationship (Orders → Product)', desc: 'Connects sales to product catalog. Filter: Only orders with a valid product SKU are included.', fromChoices: ['orders.product_id', 'orders.order_id'], toChoices: ['products.product_id', 'products.product_name'] },
   });
-  const [entityPositions, setEntityPositions] = useState(() => {
-    // Pre-compute Dagre layout so the first render already has correct positions.
-    // This avoids any timing race between state updates and fitView.
-    const g = new Dagre.graphlib.Graph();
-    g.setGraph({ rankdir: 'LR', ranksep: 80, nodesep: 40 });
-    g.setDefaultEdgeLabel(() => ({}));
-    INITIAL_ENTITIES.forEach((e) => {
-      g.setNode(e.id, { width: ENTITY_CARD_WIDTH, height: ENTITY_HEADER_HEIGHT + e.fields.length * ENTITY_ROW_HEIGHT + ENTITY_FOOTER_HEIGHT });
-    });
-    // Include initial joins so Dagre knows the rank hierarchy
-    [['orders', 'customers'], ['orders', 'products']].forEach(([from, to]) => {
-      if (g.hasNode(from) && g.hasNode(to)) g.setEdge(from, to);
-    });
-    Dagre.layout(g);
-    return Object.fromEntries(INITIAL_ENTITIES.map((e) => {
-      const node = g.node(e.id);
-      return [e.id, node ? { x: node.x - ENTITY_CARD_WIDTH / 2, y: node.y } : { x: e.x, y: e.y }];
-    }));
-  });
+  const [entityPositions, setEntityPositions] = useState({});
 
-  // Lifted to state so new entities and models can be added
-  const [canvasEntities, setCanvasEntities] = useState(INITIAL_ENTITIES);
-  // eslint-disable-next-line no-unused-vars
-  const [models, setModels] = useState(MODELS);
+  const [canvasEntities, setCanvasEntities] = useState(() =>
+    DATA_MODELS_INITIAL.map((m) => ({
+      id: m.id,
+      label: m.name,
+      dbName: m.sourceName,
+      source: m.sourceName,
+      primary: false,
+      definition: m.description,
+      fields: m.fields,
+    }))
+  );
 
   // ── Catalog state (new two-pane layout) ────────────────────────────────
   const [objectType, setObjectType] = useState('models'); // left-pane tab only
@@ -3385,6 +3328,14 @@ function App() {
   const [editPaneDraft, setEditPaneDraft] = useState(null);
   const catalogPaneRef = useRef(null);
   const lpContainerRef = useRef(null);
+
+  // Remember last selected item per top-level view for auto-restore
+  const lastModelsItemIdRef = useRef(null);
+  const lastMetricsItemIdRef = useRef(null);
+
+  // ── Confirm dialog (replaces all window.confirm calls) ────────────────────
+  // shape: { title, message, confirmLabel?, cancelLabel?, onConfirm } | null
+  const [confirmDialog, setConfirmDialog] = useState(null);
 
   // Add data source modal state
   const [addSourceOpen, setAddSourceOpen] = useState(false);
@@ -3877,14 +3828,12 @@ function App() {
   const handleCreateNewModel = () => {
     if (!newModelName.trim()) return;
     const id = newModelName.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-    const newModel = {
+    const stub = {
       id, name: newModelName.trim(),
-      desc: `Model with ${canvasEntities.length} table${canvasEntities.length !== 1 ? 's' : ''}`,
-      entities: canvasEntities.length, joins: 0, uses: 0, stage: 'draft', progress: 0,
+      sourceId: '', sourceName: '', description: '', grain: '',
+      usedInDatasetIds: [], fields: [],
     };
-    setModels((prev) => ({ ...prev, draft: [...prev.draft, newModel] }));
-    setView('editor');
-    setStage('draft');
+    setDataModels((prev) => [...prev, stub]);
     setAddSourceOpen(false);
     resetAddSourceState();
   };
@@ -3899,6 +3848,34 @@ function App() {
     setIsEditing(false);
     setEditDraft(null);
     setView('catalog');
+  };
+
+  // ── Move dataset between Kanban stages ───────────────────────────────────
+  const doMoveDataset = (dsId, fromStage, toStage) => {
+    setDatasets((prev) => {
+      const item = prev[fromStage]?.find((d) => d.id === dsId);
+      if (!item) return prev;
+      return {
+        ...prev,
+        [fromStage]: prev[fromStage].filter((d) => d.id !== dsId),
+        [toStage]: [...prev[toStage], { ...item, stage: toStage, lastModified: Date.now() }],
+      };
+    });
+  };
+
+  const handleMoveDataset = (dsId, fromStage, toStage) => {
+    if (toStage === 'production') {
+      const allDs = [...datasets.draft, ...datasets.dev, ...datasets.production];
+      const ds = allDs.find((d) => d.id === dsId);
+      setConfirmDialog({
+        title: 'Promote to Production',
+        message: `"${ds?.name}" is used in ${ds?.uses ?? 0} place${(ds?.uses ?? 0) !== 1 ? 's' : ''}. Promote to production?`,
+        confirmLabel: 'Promote',
+        onConfirm: () => doMoveDataset(dsId, fromStage, toStage),
+      });
+    } else {
+      doMoveDataset(dsId, fromStage, toStage);
+    }
   };
 
   // ── Open dataset from home view ───────────────────────────────────────────
@@ -3922,12 +3899,23 @@ function App() {
     setIsEditing(true);
   };
 
+  const handleRemoveModelFromDataset = (modelId) => {
+    if (!editDraft) return;
+    setEditDraft((prev) => ({ ...prev, modelIds: (prev.modelIds ?? []).filter((id) => id !== modelId) }));
+  };
+
   const handleAddMetricToDataset = (metricId) => {
     if (!selectedObjectId) return;
     setMetrics((prev) => prev.map((m) =>
       m.id === metricId ? { ...m, datasetId: selectedObjectId } : m
     ));
     if (!isEditing) setIsEditing(true);
+  };
+
+  const handleRemoveMetricFromDataset = (metricId) => {
+    setMetrics((prev) => prev.map((m) =>
+      m.id === metricId ? { ...m, datasetId: null } : m
+    ));
   };
 
   // ── Open edit pane ────────────────────────────────────────────────────────
@@ -3979,6 +3967,36 @@ function App() {
     setEditPaneItem((prev) => prev ? { ...prev, id: savedId, mode: 'inspect' } : prev);
   };
 
+  // Track last selected item per top-level view
+  useEffect(() => {
+    if (editPaneItem?.type === 'model' && editPaneItem.id) lastModelsItemIdRef.current = editPaneItem.id;
+    else if (editPaneItem?.type === 'metric' && editPaneItem.id) lastMetricsItemIdRef.current = editPaneItem.id;
+  }, [editPaneItem]);
+
+  // Auto-select first (or last remembered) item when entering models/metrics views
+  useEffect(() => {
+    if (view === 'models') {
+      if (editPaneItem?.type === 'model') return;
+      const targetId = lastModelsItemIdRef.current || dataModels[0]?.id;
+      if (targetId) openEditPane('model', targetId, 'inspect', null);
+    } else if (view === 'metrics') {
+      if (editPaneItem?.type === 'metric') return;
+      const targetId = lastMetricsItemIdRef.current || metrics[0]?.id;
+      if (targetId) openEditPane('metric', targetId, 'inspect', null);
+    }
+  }, [view]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Guard navigation away from unsaved dataset edits
+  const guardedExitEdit = useCallback((onConfirmed) => {
+    if (!isEditing) { onConfirmed(); return; }
+    setConfirmDialog({
+      title: 'Unsaved changes',
+      message: 'Discard unsaved changes and continue?',
+      confirmLabel: 'Discard',
+      onConfirm: () => { setIsEditing(false); setEditDraft(null); onConfirmed(); },
+    });
+  }, [isEditing]);
+
   // Derived: currently selected dataset (for catalog view)
   const selectedDataset = useMemo(() => {
     if (!selectedObjectId || selectedObjectType !== 'datasets') return null;
@@ -4004,7 +4022,7 @@ function App() {
       <nav className="nav">
         {/* ── Left ── */}
         <div className="nav-left">
-          {view === 'home' ? (
+          {view === 'home' || view === 'models' || view === 'metrics' ? (
             <div className="nav-brand">
               <span className="nav-brand-dot" />
               <span>Reveal</span>
@@ -4012,31 +4030,46 @@ function App() {
             </div>
           ) : view === 'catalog' ? (
             <div className="nav-breadcrumb">
-              <button className="plain-btn nav-back-home" onClick={() => { setView('home'); setEditPaneItem(null); }}>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+              <button className="plain-btn nav-back-home" onClick={() => guardedExitEdit(() => { setView('home'); setEditPaneItem(null); })}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+                Back
               </button>
               <span className="nav-breadcrumb-sep">/</span>
               <DatasetCombo
                 datasets={datasets}
                 selectedObjectId={selectedObjectId}
-                onChange={(id) => {
+                onChange={(id) => guardedExitEdit(() => {
                   setSelectedObjectId(id);
                   setSelectedObjectType('datasets');
                   setIsEditing(false);
                   setEditDraft(null);
                   setEditPaneItem(null);
-                }}
+                })}
               />
             </div>
           ) : (
-            <button className="plain-btn nav-back" onClick={() => { setView('home'); setEditPaneItem(null); }}>
+            <button className="plain-btn nav-back" onClick={() => guardedExitEdit(() => { setView('home'); setEditPaneItem(null); })}>
               ← Home
             </button>
           )}
         </div>
 
-        {/* ── Center (unused in catalog — breadcrumb is left-aligned) ── */}
-        <div className="nav-center" />
+        {/* ── Center — nav tabs for top-level views ── */}
+        <div className="nav-center">
+          {(view === 'home' || view === 'models' || view === 'metrics') && (
+            <div className="nav-tabs">
+              {[{ id: 'home', label: 'Datasets' }, { id: 'models', label: 'Models' }, { id: 'metrics', label: 'Metrics' }].map(({ id, label }) => (
+                <button
+                  key={id}
+                  className={`nav-tab${view === id ? ' nav-tab-active' : ''}`}
+                  onClick={() => guardedExitEdit(() => { setView(id); setEditPaneItem(null); })}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
 
         {/* ── Right ── */}
         <div className="nav-right">
@@ -4076,7 +4109,102 @@ function App() {
             metrics={metrics}
             onOpenDataset={handleOpenDataset}
             onNewDataset={handleNewDataset}
+            onMoveDataset={handleMoveDataset}
           />
+        </section>
+      )}
+
+      {/* ── Models view — two-panel ── */}
+      {view === 'models' && (
+        <section className="view active">
+          <div className="two-panel-layout">
+            <ModelsView
+              dataModels={dataModels}
+              datasets={datasets}
+              selectedModelId={editPaneItem?.type === 'model' ? editPaneItem.id : null}
+              onInspectModel={(id) => openEditPane('model', id, 'inspect', null)}
+              onEditModel={(id) => openEditPane('model', id, 'edit', null)}
+              onDeleteModel={(id) => setConfirmDialog({ title: 'Delete model', message: 'Remove this model from the catalog?', confirmLabel: 'Delete', onConfirm: () => setDataModels((prev) => prev.filter((m) => m.id !== id)) })}
+              onNewModel={() => {
+                const id = `model-${Date.now()}`;
+                const stub = { id, name: 'New Model', sourceId: 'sales-db', sourceName: 'Sales DB', description: '', grain: '', usedInDatasetIds: [], fields: [] };
+                setDataModels((prev) => [...prev, stub]);
+                openEditPane('model', id, 'edit', null);
+              }}
+            />
+            <SidePane
+              variant="inline"
+              isOpen={!!editPaneItem}
+              mode={editPaneItem?.mode || 'inspect'}
+              title={editPaneTitle}
+              typeBadge="model"
+              isGlobal
+              onDiscardClose={() => setConfirmDialog({ title: 'Unsaved changes', message: 'Discard changes to this model?', confirmLabel: 'Discard', onConfirm: handleCloseEditPane })}
+              onSave={handleSaveFromPane}
+              onEdit={() => setEditPaneItem((prev) => prev ? { ...prev, mode: 'edit' } : prev)}
+              stableKey={editPaneDraft?.stableKey || (editPaneModel ? autoStableKey(editPaneModel) : undefined)}
+              onStableKeyChange={(val) => setEditPaneDraft((p) => p ? { ...p, stableKey: val } : p)}
+              onRequestStableKeyUnlock={(cb) => setConfirmDialog({ title: 'Unlock stable key', message: 'Changing the stable key may break existing integrations. Continue?', confirmLabel: 'Unlock', onConfirm: cb })}
+            >
+              {editPaneItem?.type === 'model' && editPaneDraft && (
+                <DataModelDetail
+                  model={editPaneModel ?? editPaneDraft}
+                  isEditing={editPaneItem?.mode === 'edit'}
+                  editDraft={editPaneDraft}
+                  setIsEditing={() => {}}
+                  setEditDraft={setEditPaneDraft}
+                  onSave={handleSaveFromPane}
+                  onCancel={handleCloseEditPane}
+                  inPane
+                  onRequestStableKeyUnlock={(cb) => setConfirmDialog({ title: 'Unlock stable key', message: 'Changing the stable key may break existing integrations. Continue?', confirmLabel: 'Unlock', onConfirm: cb })}
+                />
+              )}
+            </SidePane>
+          </div>
+        </section>
+      )}
+
+      {/* ── Metrics view — two-panel ── */}
+      {view === 'metrics' && (
+        <section className="view active">
+          <div className="two-panel-layout">
+            <MetricsView
+              metrics={metrics}
+              selectedMetricId={editPaneItem?.type === 'metric' ? editPaneItem.id : null}
+              onInspectMetric={(id) => openEditPane('metric', id, 'inspect', null)}
+              onEditMetric={(id) => openEditPane('metric', id, 'edit', null)}
+              onDeleteMetric={(id) => {
+                setConfirmDialog({
+                  title: 'Delete metric',
+                  message: 'Delete this metric from the catalog?',
+                  confirmLabel: 'Delete',
+                  onConfirm: () => setMetrics((prev) => prev.filter((m) => m.id !== id)),
+                });
+              }}
+              onNewMetric={() => openEditPane('metric', null, 'edit', null)}
+            />
+            <SidePane
+              variant="inline"
+              isOpen={!!editPaneItem}
+              mode={editPaneItem?.mode || 'inspect'}
+              title={editPaneTitle}
+              typeBadge="metric"
+              isGlobal={false}
+              onDiscardClose={() => setConfirmDialog({ title: 'Unsaved changes', message: 'Discard changes to this metric?', confirmLabel: 'Discard', onConfirm: handleCloseEditPane })}
+              onSave={handleSaveFromPane}
+              onEdit={() => setEditPaneItem((prev) => prev ? { ...prev, mode: 'edit' } : prev)}
+            >
+              {editPaneItem?.type === 'metric' && (
+                <MetricsFormulaEditor
+                  metric={editPaneMetric}
+                  dataModels={dataModels}
+                  isEditing={editPaneItem.mode === 'edit'}
+                  draft={editPaneDraft}
+                  setDraft={setEditPaneDraft}
+                />
+              )}
+            </SidePane>
+          </div>
         </section>
       )}
 
@@ -4088,36 +4216,38 @@ function App() {
               <EditorLeftPane
                 dataModels={dataModels}
                 metrics={metrics}
-                currentDataset={selectedDataset}
+                currentDataset={editDraft ?? selectedDataset}
                 isDatasetEditing={isEditing}
                 activeItemId={editPaneItem?.id || null}
                 activeItemType={editPaneItem?.type || null}
-                onBeforeTabChange={(newTab) => {
-                  if (!editPaneItem) return true;
-                  if (editPaneItem.mode === 'inspect') {
-                    handleCloseEditPane();
-                    return true;
-                  }
-                  const ok = window.confirm('You have unsaved changes. Discard and close?');
-                  if (ok) handleCloseEditPane();
-                  return ok;
+                onBeforeTabChange={() => {
+                  handleCloseEditPane();
+                  return true;
                 }}
-                onEditModel={(id, ref) => openEditPane('model', id, 'edit', ref)}
-                onInspectModel={(id, ref) => openEditPane('model', id, 'inspect', ref)}
+                onInspectModel={(id) => openEditPane('model', id, 'inspect', null)}
+                onEditModel={(id) => openEditPane('model', id, 'edit', null)}
                 onDeleteModel={(id) => {
-                  if (window.confirm('Delete this model from the catalog?')) {
-                    setDataModels((prev) => prev.filter((m) => m.id !== id));
-                  }
+                  setConfirmDialog({
+                    title: 'Delete model',
+                    message: 'Remove this model from the catalog?',
+                    confirmLabel: 'Delete',
+                    onConfirm: () => setDataModels((prev) => prev.filter((m) => m.id !== id)),
+                  });
                 }}
                 onAddModel={(id) => handleAddModelToDataset(id)}
-                onEditMetric={(id, ref) => openEditPane('metric', id, 'edit', ref)}
-                onInspectMetric={(id, ref) => openEditPane('metric', id, 'inspect', ref)}
+                onRemoveModel={(id) => handleRemoveModelFromDataset(id)}
+                onInspectMetric={(id) => openEditPane('metric', id, 'inspect', null)}
+                onEditMetric={(id) => openEditPane('metric', id, 'edit', null)}
                 onDeleteMetric={(id) => {
-                  if (window.confirm('Delete this metric?')) {
-                    setMetrics((prev) => prev.filter((m) => m.id !== id));
-                  }
+                  setConfirmDialog({
+                    title: 'Delete metric',
+                    message: 'Delete this metric from the catalog?',
+                    confirmLabel: 'Delete',
+                    onConfirm: () => setMetrics((prev) => prev.filter((m) => m.id !== id)),
+                  });
                 }}
                 onAddMetric={(id) => handleAddMetricToDataset(id)}
+                onRemoveMetric={(id) => handleRemoveMetricFromDataset(id)}
                 onNewModel={() => {
                   const id = `model-${Date.now()}`;
                   const stub = { id, name: 'New Model', sourceId: 'sales-db', sourceName: 'Sales DB', description: '', grain: '', usedInDatasetIds: [], fields: [] };
@@ -4127,43 +4257,6 @@ function App() {
                 onNewMetric={() => openEditPane('metric', null, 'edit', null)}
               />
             </div>
-            <EditPane
-              isOpen={editPaneItem !== null}
-              mode={editPaneItem?.mode || 'inspect'}
-              title={editPaneTitle}
-              typeBadge={editPaneItem?.type || null}
-              caretY={editPaneCaretY}
-              isGlobal={editPaneItem?.type === 'model'}
-              width={editPaneItem?.type === 'metric' ? 500 : undefined}
-              excludeRef={lpContainerRef}
-              onClose={handleCloseEditPane}
-              onSave={handleSaveFromPane}
-              onEdit={() => setEditPaneItem((prev) => prev ? { ...prev, mode: 'edit' } : prev)}
-              stableKey={editPaneItem?.type === 'model' ? (editPaneDraft?.stableKey || (editPaneModel ? autoStableKey(editPaneModel) : undefined)) : undefined}
-              onStableKeyChange={editPaneItem?.type === 'model' ? (val) => setEditPaneDraft((p) => p ? { ...p, stableKey: val } : p) : undefined}
-            >
-              {editPaneItem?.type === 'model' && editPaneDraft && (
-                <DataModelDetail
-                  model={editPaneModel ?? editPaneDraft}
-                  isEditing={editPaneItem.mode === 'edit'}
-                  editDraft={editPaneDraft}
-                  setIsEditing={() => {}}
-                  setEditDraft={setEditPaneDraft}
-                  onSave={handleSaveFromPane}
-                  onCancel={handleCloseEditPane}
-                  inPane
-                />
-              )}
-              {editPaneItem?.type === 'metric' && (
-                <MetricsFormulaEditor
-                  metric={editPaneMetric}
-                  dataModels={dataModels}
-                  isEditing={editPaneItem.mode === 'edit'}
-                  draft={editPaneDraft}
-                  setDraft={setEditPaneDraft}
-                />
-              )}
-            </EditPane>
             <div
               className="cat-canvas-area"
               ref={catalogPaneRef}
@@ -4244,7 +4337,7 @@ function App() {
         isOpen={addCalcFieldEntityId !== null}
         onClose={() => setAddCalcFieldEntityId(null)}
         onSave={handleSaveCalcField}
-        availableFields={canvasEntities.flatMap((e) => e.fields)}
+        availableFields={dataModels.flatMap((m) => m.fields)}
       />
 
       {/* AI chat modal */}
@@ -4457,6 +4550,61 @@ function App() {
         </Dialog.Portal>
       </Dialog.Root>
 
+      {/* ── Side Pane (overlay — catalog view only) ── */}
+      <SidePane
+        isOpen={editPaneItem !== null && view === 'catalog'}
+        mode={editPaneItem?.mode || 'inspect'}
+        title={editPaneTitle}
+        typeBadge={editPaneItem?.type || null}
+        isGlobal={editPaneItem?.type === 'model'}
+        width={editPaneItem?.type === 'metric' ? 500 : 1150}
+        onClose={handleCloseEditPane}
+        onDiscardClose={() => setConfirmDialog({
+          title: 'Unsaved changes',
+          message: 'Discard changes to this item?',
+          confirmLabel: 'Discard',
+          onConfirm: handleCloseEditPane,
+        })}
+        onSave={handleSaveFromPane}
+        onEdit={() => setEditPaneItem((prev) => prev ? { ...prev, mode: 'edit' } : prev)}
+        stableKey={editPaneItem?.type === 'model' ? (editPaneDraft?.stableKey || (editPaneModel ? autoStableKey(editPaneModel) : undefined)) : undefined}
+        onStableKeyChange={editPaneItem?.type === 'model' ? (val) => setEditPaneDraft((p) => p ? { ...p, stableKey: val } : p) : undefined}
+        onRequestStableKeyUnlock={(cb) => setConfirmDialog({
+          title: 'Unlock stable key',
+          message: 'Changing the stable key may break existing integrations. Continue?',
+          confirmLabel: 'Unlock',
+          onConfirm: cb,
+        })}
+      >
+        {editPaneItem?.type === 'model' && editPaneDraft && (
+          <DataModelDetail
+            model={editPaneModel ?? editPaneDraft}
+            isEditing={editPaneItem.mode === 'edit'}
+            editDraft={editPaneDraft}
+            setIsEditing={() => {}}
+            setEditDraft={setEditPaneDraft}
+            onSave={handleSaveFromPane}
+            onCancel={handleCloseEditPane}
+            inPane
+            onRequestStableKeyUnlock={(cb) => setConfirmDialog({
+              title: 'Unlock stable key',
+              message: 'Changing the stable key may break existing integrations. Continue?',
+              confirmLabel: 'Unlock',
+              onConfirm: cb,
+            })}
+          />
+        )}
+        {editPaneItem?.type === 'metric' && (
+          <MetricsFormulaEditor
+            metric={editPaneMetric}
+            dataModels={dataModels}
+            isEditing={editPaneItem.mode === 'edit'}
+            draft={editPaneDraft}
+            setDraft={setEditPaneDraft}
+          />
+        )}
+      </SidePane>
+
       {/* ── Source Drawer ── */}
       <SourceDrawer
         open={srcDrawerOpen}
@@ -4468,6 +4616,30 @@ function App() {
         drawerTarget={srcDrawerTarget}
         setDrawerTarget={setSrcDrawerTarget}
       />
+
+      {/* ── Reusable confirm dialog (replaces all window.confirm) ── */}
+      <Dialog.Root open={!!confirmDialog} onOpenChange={(open) => { if (!open) setConfirmDialog(null); }}>
+        <Dialog.Portal>
+          <Dialog.Backdrop className="dialog-backdrop" />
+          <Dialog.Viewport className="dialog-viewport">
+            <Dialog.Popup className="dialog-popup">
+              <Dialog.Title className="modal-title">{confirmDialog?.title}</Dialog.Title>
+              {confirmDialog?.message && (
+                <Dialog.Description className="modal-desc">{confirmDialog.message}</Dialog.Description>
+              )}
+              <div className="modal-actions">
+                <Dialog.Close className="btn">{confirmDialog?.cancelLabel || 'Cancel'}</Dialog.Close>
+                <button
+                  className="btn btn-primary"
+                  onClick={() => { confirmDialog?.onConfirm(); setConfirmDialog(null); }}
+                >
+                  {confirmDialog?.confirmLabel || 'Confirm'}
+                </button>
+              </div>
+            </Dialog.Popup>
+          </Dialog.Viewport>
+        </Dialog.Portal>
+      </Dialog.Root>
     </div>
   );
 }
@@ -4913,7 +5085,7 @@ function SourceDrawer({
 
           <div className="src-drawer-body">
             {/* Connected section */}
-            {filteredConnectedList.length > 0 && (
+            {filteredConnectedList.length > 0 ? (
               <div className="src-list-section">
                 <div className="src-section-lbl">Connected</div>
                 {filteredConnectedList.map((item) => (
@@ -4931,6 +5103,20 @@ function SourceDrawer({
                     <span className="src-row-chevron">›</span>
                   </button>
                 ))}
+              </div>
+            ) : !drawerSearch && (
+              <div className="src-empty-connected">
+                <p className="src-empty-connected-title">No sources connected yet.</p>
+                <p className="src-empty-connected-sub">Connect a data source to start building models.</p>
+                <button
+                  className="btn btn-primary src-empty-connected-btn"
+                  onClick={() => {
+                    const first = CONNECTOR_CATEGORIES[0]?.items[0];
+                    if (first) setDrawerTarget(first.id);
+                  }}
+                >
+                  + Connect a source
+                </button>
               </div>
             )}
 

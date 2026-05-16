@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import PillList from './PillList';
 
 const STAGE_BADGE = {
@@ -22,7 +22,13 @@ const TIMELINE_EVENTS = [
   { id: 10, time: 'May 6', action: 'created', target: 'Support tickets', targetType: 'dataset' },
 ];
 
-function DatasetCard({ dataset, dataModels, metrics, onOpen }) {
+const KANBAN_COLUMNS = [
+  { key: 'draft', label: 'Draft' },
+  { key: 'dev', label: 'Dev' },
+  { key: 'production', label: 'Production' },
+];
+
+function DatasetCard({ dataset, dataModels, metrics, onOpen, draggable, onDragStart }) {
   const modelItems = (dataset.modelIds || []).map((id) => {
     const m = dataModels.find((dm) => dm.id === id);
     return { id, label: m ? m.name : id };
@@ -34,6 +40,8 @@ function DatasetCard({ dataset, dataModels, metrics, onOpen }) {
   return (
     <article
       className="ds-hc"
+      draggable={draggable}
+      onDragStart={onDragStart}
       onClick={() => onOpen(dataset.id)}
       role="button"
       tabIndex={0}
@@ -73,11 +81,23 @@ function DatasetCard({ dataset, dataModels, metrics, onOpen }) {
   );
 }
 
-export default function HomeView({ datasets, dataModels, metrics, onOpenDataset, onNewDataset }) {
-  const allDatasets = [...datasets.draft, ...datasets.dev, ...datasets.production];
-  const today = allDatasets.slice(0, 2);
-  const yesterday = allDatasets.slice(2, 3);
-  const older = allDatasets.slice(3);
+export default function HomeView({ datasets, dataModels, metrics, onOpenDataset, onNewDataset, onMoveDataset }) {
+  const [dragOver, setDragOver] = useState(null);
+
+  const sorted = {
+    draft: [...datasets.draft].sort((a, b) => (b.lastModified ?? 0) - (a.lastModified ?? 0)),
+    dev: [...datasets.dev].sort((a, b) => (b.lastModified ?? 0) - (a.lastModified ?? 0)),
+    production: [...datasets.production].sort((a, b) => (b.lastModified ?? 0) - (a.lastModified ?? 0)),
+  };
+
+  const handleDrop = (e, toStage) => {
+    e.preventDefault();
+    const dsId = e.dataTransfer.getData('application/x-dataset-id');
+    const fromStage = e.dataTransfer.getData('application/x-dataset-stage');
+    setDragOver(null);
+    if (!dsId || fromStage === toStage) return;
+    onMoveDataset?.(dsId, fromStage, toStage);
+  };
 
   return (
     <div className="home-view">
@@ -101,7 +121,7 @@ export default function HomeView({ datasets, dataModels, metrics, onOpenDataset,
         </div>
       </aside>
 
-      {/* Right: Dataset cards */}
+      {/* Right: Kanban board */}
       <main className="home-datasets">
         <div className="home-ds-hd">
           <span className="home-ds-title">Datasets</span>
@@ -110,65 +130,46 @@ export default function HomeView({ datasets, dataModels, metrics, onOpenDataset,
           </button>
         </div>
 
-        {today.length > 0 && (
-          <section className="home-ds-group">
-            <h3 className="home-ds-group-title">Today</h3>
-            <div className="home-ds-cards">
-              {today.map((ds) => (
-                <DatasetCard
-                  key={ds.id}
-                  dataset={ds}
-                  dataModels={dataModels}
-                  metrics={metrics}
-                  onOpen={onOpenDataset}
-                />
-              ))}
+        <div className="home-kanban">
+          {KANBAN_COLUMNS.map(({ key, label }) => (
+            <div
+              key={key}
+              className={`home-kanban-col${dragOver === key ? ' drag-over' : ''}`}
+              onDragOver={(e) => { e.preventDefault(); setDragOver(key); }}
+              onDragLeave={(e) => {
+                // only clear if leaving the column itself, not a child
+                if (!e.currentTarget.contains(e.relatedTarget)) setDragOver(null);
+              }}
+              onDrop={(e) => handleDrop(e, key)}
+            >
+              <div className="home-kanban-col-hd">
+                <span className="home-kanban-col-title">{label}</span>
+                <span className="home-kanban-count">{sorted[key].length}</span>
+              </div>
+              <div className="home-kanban-col-cards">
+                {sorted[key].length === 0 ? (
+                  <div className="home-kanban-empty">No datasets in {label.toLowerCase()}</div>
+                ) : (
+                  sorted[key].map((ds) => (
+                    <DatasetCard
+                      key={ds.id}
+                      dataset={ds}
+                      dataModels={dataModels}
+                      metrics={metrics}
+                      onOpen={onOpenDataset}
+                      draggable
+                      onDragStart={(e) => {
+                        e.dataTransfer.setData('application/x-dataset-id', ds.id);
+                        e.dataTransfer.setData('application/x-dataset-stage', key);
+                        e.dataTransfer.effectAllowed = 'move';
+                      }}
+                    />
+                  ))
+                )}
+              </div>
             </div>
-          </section>
-        )}
-
-        {yesterday.length > 0 && (
-          <section className="home-ds-group">
-            <h3 className="home-ds-group-title">Yesterday</h3>
-            <div className="home-ds-cards">
-              {yesterday.map((ds) => (
-                <DatasetCard
-                  key={ds.id}
-                  dataset={ds}
-                  dataModels={dataModels}
-                  metrics={metrics}
-                  onOpen={onOpenDataset}
-                />
-              ))}
-            </div>
-          </section>
-        )}
-
-        {older.length > 0 && (
-          <section className="home-ds-group">
-            <h3 className="home-ds-group-title">Older</h3>
-            <div className="home-ds-cards">
-              {older.map((ds) => (
-                <DatasetCard
-                  key={ds.id}
-                  dataset={ds}
-                  dataModels={dataModels}
-                  metrics={metrics}
-                  onOpen={onOpenDataset}
-                />
-              ))}
-            </div>
-          </section>
-        )}
-
-        {allDatasets.length === 0 && (
-          <div className="home-ds-empty">
-            <p>No datasets yet. Create your first dataset to get started.</p>
-            <button className="btn btn-primary" onClick={onNewDataset}>
-              + New Dataset
-            </button>
-          </div>
-        )}
+          ))}
+        </div>
       </main>
     </div>
   );

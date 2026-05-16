@@ -14,22 +14,11 @@ function ChevronIcon({ open }) {
   );
 }
 
-/**
- * MetricsFormulaEditor — edit/inspect a metric with global model field access.
- *
- * Props:
- *   metric     — the metric object being edited (or null for new)
- *   dataModels — all data models (for the "Available Fields" panel)
- *   isEditing  — boolean
- *   draft      — the current draft state
- *   setDraft   — setState for draft
- */
 export default function MetricsFormulaEditor({ metric, dataModels, isEditing, draft, setDraft }) {
-  const [fieldSearch, setFieldSearch] = useState('');  
+  const [fieldSearch, setFieldSearch] = useState('');
   const [collapsed, setCollapsed] = useState({});
   const active = draft || metric || {};
 
-  // Group fields by model, carrying sourceName/sourceId
   const fieldsByModel = useMemo(() => {
     return dataModels.map((model) => ({
       modelId: model.id,
@@ -49,7 +38,6 @@ export default function MetricsFormulaEditor({ metric, dataModels, isEditing, dr
     })).filter((g) => g.fields.length > 0);
   }, [dataModels]);
 
-  // In inspect mode, only show fields referenced in the expression
   const fieldsByModelForDisplay = useMemo(() => {
     if (isEditing) return fieldsByModel;
     const expr = (active.expression || '').toLowerCase();
@@ -62,7 +50,6 @@ export default function MetricsFormulaEditor({ metric, dataModels, isEditing, dr
       .filter((g) => g.fields.length > 0);
   }, [fieldsByModel, isEditing, active.expression]);
 
-  // Filtered version for search
   const fieldsByModelFiltered = useMemo(() => {
     if (!fieldSearch) return fieldsByModelForDisplay;
     const q = fieldSearch.toLowerCase();
@@ -80,9 +67,6 @@ export default function MetricsFormulaEditor({ metric, dataModels, isEditing, dr
     setCollapsed((prev) => ({ ...prev, [modelId]: !prev[modelId] }));
   };
 
-  // A group is open if:
-  //   inspect mode — all groups open by default
-  //   edit mode    — only first group open by default
   const isGroupOpen = (modelId, index) => {
     if (modelId in collapsed) return !collapsed[modelId];
     return !isEditing || index === 0;
@@ -100,154 +84,188 @@ export default function MetricsFormulaEditor({ metric, dataModels, isEditing, dr
     setDraft((prev) => ({ ...prev, [prop]: val }));
   };
 
-  return (
-    <div className="mfe-wrap">
-      {/* Name + Global toggle */}
-      <div className="mfe-section">
-        <div className="mfe-name-row">
-          <label className="mfe-label">Metric name</label>
-          <label className="mfe-toggle-inline-wrap" title="Global metrics are available across all datasets">
-            <span className="mfe-toggle-inline-label">Global</span>
-            <input
-              type="checkbox"
-              className="mfe-toggle-input"
-              checked={active.isGlobal || false}
-              disabled={!isEditing}
-              onChange={(e) => update('isGlobal', e.target.checked)}
-            />
-            <span className="mfe-toggle" />
-          </label>
-        </div>
-        {isEditing ? (
-          <input
-            className="mfe-input"
-            value={active.name || ''}
-            placeholder="e.g. Net Revenue"
-            onChange={(e) => update('name', e.target.value)}
-          />
-        ) : (
-          <span className="mfe-value">{active.name || <span className="mfe-empty">—</span>}</span>
-        )}
-      </div>
-
-      {/* Description */}
-      <div className="mfe-section">
-        <label className="mfe-label">Description</label>
-        {isEditing ? (
-          <textarea
-            className="mfe-textarea"
-            value={active.description || ''}
-            placeholder="What does this metric measure?"
-            onChange={(e) => update('description', e.target.value)}
-          />
-        ) : (
-          <p className="mfe-desc-val">
-            {active.description || <span className="mfe-empty">No description</span>}
-          </p>
-        )}
-      </div>
-
-      {/* Aggregation */}
-      <div className="mfe-section">
-        <label className="mfe-label">Aggregation</label>
-        {isEditing ? (
-          <div className="mfe-agg-grid">
-            {AGGREGATIONS.map((agg) => (
-              <button
-                key={agg}
-                className={`mfe-agg-btn ${active.aggregation === agg ? 'mfe-agg-btn-active' : ''}`}
-                onClick={() => update('aggregation', agg)}
-              >
-                {agg}
-              </button>
-            ))}
-          </div>
-        ) : (
-          <span className="mfe-value">
-            {active.aggregation || <span className="mfe-empty">—</span>}
-          </span>
-        )}
-      </div>
-
-      {/* Formula / Expression */}
-      <div className="mfe-section">
-        <label className="mfe-label">
-          Expression
-          <span className="mfe-label-sub"> — field references or formula</span>
-        </label>
-        {isEditing ? (
-          <textarea
-            className="mfe-formula-ta"
-            value={active.expression || ''}
-            placeholder="e.g. orders.amount - orders.discount"
-            onChange={(e) => update('expression', e.target.value)}
-            spellCheck={false}
-          />
-        ) : (
-          <pre className="mfe-formula-val">
-            {active.expression || <span className="mfe-empty">No expression</span>}
-          </pre>
-        )}
-      </div>
-
-      {/* Available Fields panel — always shown in edit mode; in inspect only when fields are referenced */}
-      {(isEditing || fieldsByModelFiltered.length > 0) && (
-      <div className="mfe-fields-panel">
-        <div className="mfe-fields-hd">
-          <span className="mfe-fields-title">{isEditing ? 'Available fields' : 'Fields used'}</span>
-          {isEditing && (
+  const FieldsPanel = ({ title, showSearch }) => (
+    <div className="mfe-fields-panel">
+      <div className="mfe-fields-hd">
+        <span className="mfe-fields-title">{title}</span>
+        {showSearch && (
           <input
             className="mfe-fields-search"
             placeholder="Search…"
             value={fieldSearch}
             onChange={(e) => setFieldSearch(e.target.value)}
           />
-          )}
-        </div>
-        <div className="mfe-fields-list">
-          {fieldsByModelFiltered.map((group, idx) => {
-            const open = isGroupOpen(group.modelId, idx);
-            return (
-              <div key={group.modelId} className="mfe-field-group">
+        )}
+      </div>
+      <div className="mfe-fields-list">
+        {fieldsByModelFiltered.map((group, idx) => {
+          const open = isGroupOpen(group.modelId, idx);
+          return (
+            <div key={group.modelId} className="mfe-field-group">
+              <button
+                className="mfe-field-group-hd"
+                onClick={() => toggleGroup(group.modelId)}
+                aria-expanded={open}
+              >
+                <span className="mfe-field-group-name">{group.modelName}</span>
+                <span className="mfe-field-group-count">({group.fields.length})</span>
+                <span className="mfe-field-group-right">
+                  <span className="mfe-field-group-source">{group.sourceName}</span>
+                  <ChevronIcon open={open} />
+                </span>
+              </button>
+              {open && group.fields.map((f) => (
                 <button
-                  className="mfe-field-group-hd"
-                  onClick={() => toggleGroup(group.modelId)}
-                  aria-expanded={open}
+                  key={f.key}
+                  className="mfe-field-row"
+                  onClick={() => insertFieldRef(f.key)}
+                  disabled={!isEditing}
+                  title={isEditing ? `Insert ${f.key}` : f.key}
                 >
-                  <span className="mfe-field-group-name">{group.modelName}</span>
-                  <span className="mfe-field-group-count">({group.fields.length})</span>
-                  <span className="mfe-field-group-right">
-                    <span className="mfe-field-group-source">{group.sourceName}</span>
-                    <span className="mfe-field-group-chevron">{open ? '∨' : '›'}</span>
+                  <span className={`mfe-field-type ftype ${f.isKey ? 'key' : ''} ${f.type === 'fx' ? 'calc' : ''}`}>
+                    {f.type}
                   </span>
+                  <span className="mfe-field-info">
+                    <span className="mfe-field-label">{f.label}</span>
+                  </span>
+                  <span className="mfe-field-key">{f.key}</span>
                 </button>
-                {open && group.fields.map((f) => (
-                  <button
-                    key={f.key}
-                    className="mfe-field-row"
-                    onClick={() => insertFieldRef(f.key)}
-                    disabled={!isEditing}
-                    title={isEditing ? `Insert ${f.key}` : f.key}
-                  >
-                    <span className={`mfe-field-type ftype ${f.isKey ? 'key' : ''} ${f.type === 'fx' ? 'calc' : ''}`}>
-                      {f.type}
-                    </span>
-                    <span className="mfe-field-info">
-                      <span className="mfe-field-label">{f.label}</span>
-                    </span>
-                    <span className="mfe-field-key">{f.key}</span>
-                  </button>
-                ))}
-              </div>
-            );
-          })}
-          {fieldsByModelFiltered.length === 0 && isEditing && (
-            <div className="mfe-fields-empty">No fields match your search.</div>
-          )}
+              ))}
+            </div>
+          );
+        })}
+        {fieldsByModelFiltered.length === 0 && isEditing && (
+          <div className="mfe-fields-empty">No fields match your search.</div>
+        )}
+        {fieldsByModelFiltered.length === 0 && !isEditing && (
+          <div className="mfe-fields-empty">No fields referenced.</div>
+        )}
+      </div>
+    </div>
+  );
+
+  if (!isEditing) {
+    return (
+      <div className="mfe-layout">
+        {/* Inspect header: name + badges */}
+        <div className="mfe-inspect-header">
+          <div className="mfe-inspect-name">{active.name || <span className="mfe-empty">Untitled</span>}</div>
+          <div className="mfe-inspect-badges">
+            {active.aggregation && (
+              <span className="mfe-badge mfe-badge-agg">{active.aggregation}</span>
+            )}
+            {active.isGlobal && (
+              <span className="mfe-badge mfe-badge-global">Global</span>
+            )}
+          </div>
+        </div>
+
+        {/* Two-column body */}
+        <div className="mfe-body-cols">
+          {/* Left: expression */}
+          <div className="mfe-col-main">
+            <div className="mfe-section">
+              <label className="mfe-label">
+                Expression
+                <span className="mfe-label-sub"> — field references or formula</span>
+              </label>
+              <pre className="mfe-formula-val mfe-formula-val-lg">
+                {active.expression || <span className="mfe-empty">No expression</span>}
+              </pre>
+            </div>
+          </div>
+
+          {/* Right: description + fields used */}
+          <div className="mfe-col-side">
+            <div className="mfe-section">
+              <label className="mfe-label">Description</label>
+              <p className="mfe-desc-val">
+                {active.description || <span className="mfe-empty">No description</span>}
+              </p>
+            </div>
+            {fieldsByModelForDisplay.length > 0 && (
+              <FieldsPanel title="Fields used" showSearch={false} />
+            )}
+          </div>
         </div>
       </div>
-      )}
+    );
+  }
+
+  return (
+    <div className="mfe-layout">
+      {/* Edit mode: two-column with no top header */}
+      <div className="mfe-body-cols mfe-body-cols-edit">
+        {/* Left: name, description, expression */}
+        <div className="mfe-col-main">
+          <div className="mfe-section">
+            <label className="mfe-label">Metric name</label>
+            <input
+              className="mfe-input"
+              value={active.name || ''}
+              placeholder="e.g. Net Revenue"
+              onChange={(e) => update('name', e.target.value)}
+            />
+          </div>
+
+          <div className="mfe-section">
+            <label className="mfe-label">Description</label>
+            <textarea
+              className="mfe-textarea"
+              value={active.description || ''}
+              placeholder="What does this metric measure?"
+              onChange={(e) => update('description', e.target.value)}
+            />
+          </div>
+
+          <div className="mfe-section">
+            <label className="mfe-label">
+              Expression
+              <span className="mfe-label-sub"> — field references or formula</span>
+            </label>
+            <textarea
+              className="mfe-formula-ta"
+              value={active.expression || ''}
+              placeholder="e.g. orders.amount - orders.discount"
+              onChange={(e) => update('expression', e.target.value)}
+              spellCheck={false}
+            />
+          </div>
+        </div>
+
+        {/* Right: aggregation, global, field browser */}
+        <div className="mfe-col-side">
+          <div className="mfe-section">
+            <label className="mfe-label">Aggregation</label>
+            <div className="mfe-agg-grid">
+              {AGGREGATIONS.map((agg) => (
+                <button
+                  key={agg}
+                  className={`mfe-agg-btn ${active.aggregation === agg ? 'mfe-agg-btn-active' : ''}`}
+                  onClick={() => update('aggregation', agg)}
+                >
+                  {agg}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="mfe-section">
+            <label className="mfe-toggle-inline-wrap" title="Global metrics are available across all datasets">
+              <span className="mfe-toggle-inline-label">Global metric</span>
+              <input
+                type="checkbox"
+                className="mfe-toggle-input"
+                checked={active.isGlobal || false}
+                onChange={(e) => update('isGlobal', e.target.checked)}
+              />
+              <span className="mfe-toggle" />
+            </label>
+          </div>
+
+          <FieldsPanel title="Available fields" showSearch={true} />
+        </div>
+      </div>
     </div>
   );
 }
-
